@@ -37,7 +37,7 @@ export function RtcDevicePanel({ pair, names, blocked, onActive, voiceBeta = fal
     <h3>RTC 真实设备测试 · 最多 15 秒</h3>
     <p className="audio-note">{names || '请先检测并选择输入、输出设备。'}<br/>将开启麦克风，并在所选输出播放连续 1200 Hz 测试音。请先调低系统音量。麦克风经本机 Opus 链路送至内存接收端，不回放自己、不保存文件、不上传服务器。此测试不是音质或回声消除验收。</p>
     <label>输出使用方式<select value={profile} disabled={active} onChange={e => setProfile(e.target.value as typeof profile)}><option value="headphones">耳机 · AEC 关闭</option><option value="speakers">扬声器 · AEC 开启</option></select></label>
-    <label><input type="checkbox" checked={ns} disabled={active} onChange={e => setNs(e.target.checked)}/>启用 WebRTC 降噪（效果未验收）</label>
+    <label><input type="checkbox" checked={ns} disabled={active} onChange={e => setNs(e.target.checked)}/>启用 RNNoise 降噪（效果未验收）</label>
     <label><input type="checkbox" checked={confirmed} disabled={active || blocked || !pair} onChange={e => setConfirmed(e.target.checked)}/>我已确认以上设备，允许本次录音和测试音播放</label>
     <button disabled={!state.available || !confirmed || !pair || blocked || active} onClick={() => void start()}>开始 15 秒 RTC 设备测试</button>
     <button onClick={() => { setConfirmed(false); void window.darling.rtcDeviceStop().catch(() => setError('停止请求失败，请关闭应用')); }}>立即停止 RTC 测试</button>

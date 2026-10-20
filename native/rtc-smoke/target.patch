@@ -1,7 +1,8 @@
 diff --git a/BUILD.gn b/BUILD.gn
+index 5bbc5b7..4ba00f9 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -525,6 +525,10 @@ if (!build_with_chromium) {
+@@ -525,6 +525,11 @@ if (!build_with_chromium) {
      visibility = [
        "//:default",
        "//:webrtc_lib_link_test",
@@ -9,10 +10,11 @@ diff --git a/BUILD.gn b/BUILD.gn
 +      "//:darling_pc_smoke",
 +      "//:darling_sdp_smoke",
 +      "//:darling_rtc_process",
++      "//:darling_rnnoise_evaluate",
      ]
  
      sources = []
-@@ -592,6 +596,32 @@ if (!build_with_chromium) {
+@@ -592,6 +597,40 @@ if (!build_with_chromium) {
      }
    }
  
@@ -21,7 +23,15 @@ diff --git a/BUILD.gn b/BUILD.gn
 +    sources = [ "../../../native/rtc-smoke/rtc_process.cc" ]
 +    include_dirs = [ "../../../native/media-engine/build/_deps/json-src/include" ]
 +    defines = [ "JSON_NOEXCEPTION" ]
++    libs = [ "../../rnnoise-build/Release/darling_rnnoise.lib" ]
 +    deps = [ ":webrtc", "//modules/audio_device:audio_device_module_from_input_and_output" ]
++  }
++
++  rtc_executable("darling_rnnoise_evaluate") {
++    check_includes = false
++    sources = [ "../../../native/rtc-smoke/rnnoise_evaluate.cc" ]
++    libs = [ "../../rnnoise-build/Release/darling_rnnoise.lib" ]
++    deps = [ ":webrtc" ]
 +  }
 +
 +  rtc_executable("darling_sdp_smoke") {

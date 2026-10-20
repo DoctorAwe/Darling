@@ -11,7 +11,7 @@ async function until(check: () => boolean) {
   for (let i = 0; i < 500; ++i) { if (check()) return; await new Promise(r => setTimeout(r, 20)); }
   assert.ok(check(), 'state transition timed out');
 }
-test('beta calls use real business signaling and native synthetic media, reach active and hang up', { skip: process.env.DARLING_TEST_RTC_NATIVE !== '1', timeout: 25000 }, async () => {
+for (const rnnoise of [false, true]) test(`beta calls use real signaling and synthetic media (RNNoise=${rnnoise}), reach active and hang up`, { skip: process.env.DARLING_TEST_RTC_NATIVE !== '1', timeout: 25000 }, async () => {
   const app = await createServer({ database: ':memory:', users: { dva: 'test-dva', mercy: 'test-mercy' } });
   await app.listen({ host: '127.0.0.1', port: 0 });
   const port = (app.server.address() as { port: number }).port;
@@ -24,7 +24,7 @@ test('beta calls use real business signaling and native synthetic media, reach a
   const hosts: RtcProcessHost[] = [];
   const adapters = sessions.map(session => new RtcNegotiation(session, resolve('.local/webrtc/src/out/DarlingRelease/darling_rtc_process.exe'), 'direct',
     () => ({ confirmed: true, inputDeviceId: 'not-used', outputDeviceId: 'not-used', outputProfile: 'headphones', noiseSuppression: false }),
-    (exe, scope, role) => { const host = new RtcProcessHost(exe, scope, role, ['--synthetic-audio'], 10000, 'direct'); hosts.push(host); return host; }));
+    (exe, scope, role) => { const host = new RtcProcessHost(exe, scope, role, rnnoise ? ['--synthetic-audio', '--rnnoise'] : ['--synthetic-audio'], 10000, 'direct'); hosts.push(host); return host; }));
   try {
     sessions.forEach(s => { s.configureVoice(true, true); s.start(); });
     await until(() => sessions.every(s => s.state.status === 'online' && !s.state.callPending));
@@ -38,6 +38,8 @@ test('beta calls use real business signaling and native synthetic media, reach a
       const stats = await host.diagnosticStats();
       assert.ok(stats.some(s => s.type === 'inbound-rtp' && Number(s.packetsReceived) > 10));
       assert.ok(stats.some(s => s.type === 'inbound-rtp' && typeof s.audioLevel === 'number' && s.audioLevel > 0), 'native decoded receive audio level is available');
+      if (rnnoise) assert.ok(stats.some(s => s.type === 'noise-suppression' && s.algorithm === 'rnnoise-v0.2' && Number(s.frames) > 50), 'RNNoise actually processes capture frames');
+      else assert.ok(!stats.some(s => s.type === 'noise-suppression'));
     }
     assert.equal(sessions[0].callAction('end', sessions[0].state.call!.callId).ok, true);
     await until(() => sessions.every(s => s.state.call?.phase === 'ended'));

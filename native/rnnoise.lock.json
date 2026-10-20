@@ -1,0 +1,10 @@
+{
+  "source": "https://github.com/xiph/rnnoise.git",
+  "tag": "v0.2",
+  "revision": "904a876dce1f9ab8860c0a5000ed151f9f6eef58",
+  "modelUrl": "https://media.xiph.org/rnnoise/models/rnnoise_data-0b50c45.tar.gz",
+  "modelSha256": "4ac81c5c0884ec4bd5907026aaae16209b7b76cd9d7f71af582094a2f98f4b43",
+  "model": "official regular 0b50c45",
+  "architecture": "Windows x64 SSE2, no AVX2 requirement",
+  "sdk": "10.0.26100.0"
+}

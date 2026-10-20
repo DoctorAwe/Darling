@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(darling_rnnoise LANGUAGES C)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(RNNOISE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/../../.local/rnnoise" CACHE PATH "Pinned upstream RNNoise source")
+set(RNNOISE_FILES denoise rnn pitch kiss_fft celt_lpc nnet nnet_default parse_lpcnet_weights rnnoise_data rnnoise_tables)
+foreach(name IN LISTS RNNOISE_FILES)
+  list(APPEND RNNOISE_SOURCES "${RNNOISE_SOURCE}/src/${name}.c")
+endforeach()
+# A separate DLL prevents symbol collisions with WebRTC's bundled Opus.
+# Portable x64 SSE2 baseline: no AVX2 requirement on the recipient's computer.
+add_library(darling_rnnoise SHARED ${RNNOISE_SOURCES})
+target_include_directories(darling_rnnoise PRIVATE "${RNNOISE_SOURCE}/src" PUBLIC "${RNNOISE_SOURCE}/include")
+target_compile_definitions(darling_rnnoise PRIVATE RNNOISE_BUILD DLL_EXPORT WIN32 _CRT_SECURE_NO_WARNINGS __SSE2__)
+if(MSVC)
+  target_compile_options(darling_rnnoise PRIVATE /O2 /fp:precise)
+endif()

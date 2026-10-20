@@ -18,16 +18,19 @@ for (const user of ['dva', 'mercy']) {
   const application = join(destination, 'resources/app'); mkdirSync(application, { recursive: true });
   cpSync(join(root, 'apps/desktop/dist'), join(application, 'dist'), { recursive: true });
   cpSync(rtc, join(application, 'dist/native/darling_rtc_process.exe'));
+  cpSync(join(root, '.local/rnnoise-build/Release/darling_rnnoise.dll'), join(application, 'dist/native/darling_rnnoise.dll'));
   const crt = process.env.DARLING_CRT_DIR ?? 'C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT';
   for (const dll of readdirSync(crt).filter(file => file.endsWith('.dll'))) cpSync(join(crt, dll), join(application, 'dist/native', dll));
   writeFileSync(join(application, 'dist/voice-beta.flag'), 'Private voice beta; explicit device confirmation required.\n');
-  writeFileSync(join(application, 'package.json'), JSON.stringify({ name: `darling-${user}-voice-beta`, productName: name, version: '0.5.0-beta.3', main: 'dist/main.cjs' }, null, 2));
+  writeFileSync(join(application, 'package.json'), JSON.stringify({ name: `darling-${user}-voice-beta`, productName: name, version: '0.5.0-beta.4', main: 'dist/main.cjs' }, null, 2));
   const config = JSON.parse(readFileSync(join(root, `.local/${user}.config.json`), 'utf8'));
   if (config.auth?.username !== user) throw new Error('Account config mismatch');
   writeFileSync(join(application, 'config.json'), JSON.stringify(config, null, 2));
   cpSync(join(root, 'docs/voice-beta-guide.md'), join(destination, '使用说明.md'));
   const licenses = join(destination, 'licenses'); mkdirSync(licenses);
   cpSync(license, join(licenses, 'WebRTC-dependencies.md'));
+  cpSync(join(root, '.local/rnnoise/COPYING'), join(licenses, 'RNNoise-COPYING'));
+  cpSync(join(root, 'native/rnnoise.lock.json'), join(licenses, 'RNNoise-build.json'));
   for (const file of ['LICENSE', 'PATENTS', 'AUTHORS']) cpSync(join(root, '.local/webrtc/src', file), join(licenses, `WebRTC-${file}`));
   cpSync(join(root, 'apps/desktop/dist/native/licenses/nlohmann-json-LICENSE.MIT'), join(licenses, 'nlohmann-json-LICENSE.MIT'));
   const seen = new Set();
@@ -47,5 +50,5 @@ for (const user of ['dva', 'mercy']) {
   }
   console.log(`Packaged ${name}: ${destination}`);
 }
-writeFileSync(join(release, 'build-info.json'), JSON.stringify({ builtAt: new Date().toISOString(), version: '0.5.0-beta.3', accounts: ['dva', 'mercy'], transport: 'TURN relay', maxCallMinutes: 30 }, null, 2));
+writeFileSync(join(release, 'build-info.json'), JSON.stringify({ builtAt: new Date().toISOString(), version: '0.5.0-beta.4', accounts: ['dva', 'mercy'], transport: 'TURN relay', maxCallMinutes: 30 }, null, 2));
 console.log(`Release directory: ${release}`);

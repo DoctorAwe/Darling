@@ -22,6 +22,7 @@
 #include "rtc_base/win32_socket_init.h"
 #include "api/audio_options.h"
 #include "synthetic_audio.h"
+#include "rnnoise_processing.h"
 #include "modules/audio_device/include/audio_device_factory.h"
 #include "rtc_base/win/scoped_com_initializer.h"
 
@@ -63,7 +64,7 @@ class Stats : public webrtc::RTCStatsCollectorCallback {
     auto all = Json::parse(report->ToJson(), nullptr, false);
     Json filtered = Json::array();
     if (all.is_array()) for (const auto& item : all) {
-      if (filtered.size() >= 30) break;
+      if (filtered.size() >= 29) break;
       const auto type = item.value("type", "");
       if (type != "candidate-pair" && type != "transport" && type != "inbound-rtp" && type != "outbound-rtp") continue;
       Json entry = Json::object();
@@ -99,15 +100,18 @@ class Engine {
   int remote_candidates = 0;
   bool synthetic_enabled = false;
   bool wasapi_enabled = false;
+  bool synthetic_denoise = false;
   std::unique_ptr<webrtc::ScopedCOMInitializer> com;
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> device_adm;
   webrtc::scoped_refptr<SyntheticAudio> synthetic;
+  std::shared_ptr<RnnoiseMetrics> denoise_metrics;
   bool Start() { return network->Start() && worker->Start() && signaling->Start(); }
   void Close() {
     signaling->BlockingCall([&] { if (pc) pc->Close(); pc = nullptr; factory = nullptr;
       peer_observer.candidates = Json::array(); peer_observer.candidate_count = 0; peer_observer.overflow = false; });
     if (synthetic) synthetic->Terminate();
     synthetic = nullptr;
+    denoise_metrics.reset();
     worker->BlockingCall([&] { device_adm = nullptr; com.reset(); });
     call_id.clear(); role.clear(); negotiated = false; answer_applied = false;
     remote_candidates = 0;
@@ -136,7 +140,12 @@ class Engine {
       }
       deps.audio_encoder_factory = webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>();
       deps.audio_decoder_factory = webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>();
-      deps.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+      auto apm_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+      if ((wasapi_enabled && audio.value("noiseSuppression", false)) || synthetic_denoise) {
+        denoise_metrics = std::make_shared<RnnoiseMetrics>();
+        apm_builder->SetCapturePostProcessing(std::make_unique<RnnoiseProcessing>(denoise_metrics));
+      }
+      deps.audio_processing_builder = std::move(apm_builder);
       webrtc::EnableMedia(deps);
       factory = webrtc::CreateModularPeerConnectionFactory(std::move(deps));
       if (!factory) return;
@@ -181,7 +190,8 @@ class Engine {
         options.highpass_filter = false;
         if (wasapi_enabled) {
           options.echo_cancellation = audio["outputProfile"] == "speakers";
-          options.noise_suppression = audio["noiseSuppression"].get<bool>();
+          // RNNoise runs once in capture post-processing, after AEC.
+          options.noise_suppression = false;
         }
         auto source = factory->CreateAudioSource(options);
         auto track = factory->CreateAudioTrack(wasapi_enabled ? "wasapi" : "synthetic", source.get());
@@ -239,13 +249,15 @@ bool ServersValid(const Json& servers) {
   return true;
 }
 int main(int argc, char** argv) {
-  if (argc > 2 || (argc == 2 && std::string(argv[1]) != "--synthetic-audio" && std::string(argv[1]) != "--wasapi-audio")) return 6;
+  if (argc > 3 || (argc >= 2 && std::string(argv[1]) != "--synthetic-audio" && std::string(argv[1]) != "--wasapi-audio") ||
+      (argc == 3 && (std::string(argv[1]) != "--synthetic-audio" || std::string(argv[2]) != "--rnnoise"))) return 6;
   webrtc::WinsockInitializer winsock;
   if (winsock.error() != 0) return 5;
   if (!webrtc::InitializeSSL()) return 1;
   {
     Engine engine;
-    engine.synthetic_enabled = argc == 2 && std::string(argv[1]) == "--synthetic-audio";
+    engine.synthetic_enabled = argc >= 2 && std::string(argv[1]) == "--synthetic-audio";
+    engine.synthetic_denoise = argc == 3;
     engine.wasapi_enabled = argc == 2 && std::string(argv[1]) == "--wasapi-audio";
     if (!engine.Start()) std::quick_exit(2);
     bool ready = false;
@@ -300,6 +312,11 @@ int main(int argc, char** argv) {
               {"matchedBlocks", engine.synthetic->matched.load()}, {"errors", engine.synthetic->errors.load()},
               {"decodedRms", engine.synthetic->decoded_rms.load()}, {"decodedPeak", engine.synthetic->decoded_peak.load()},
               {"maximumPeak", engine.synthetic->maximum_peak.load()}});
+            if (engine.denoise_metrics) response["stats"].push_back({
+              {"type", "noise-suppression"}, {"algorithm", "rnnoise-v0.2"},
+              {"frames", engine.denoise_metrics->frames.load()},
+              {"totalUs", engine.denoise_metrics->total_us.load()},
+              {"maximumUs", engine.denoise_metrics->maximum_us.load()}});
             engine.signaling->BlockingCall([&] {
               const auto* remote = engine.pc->remote_description();
               response["stats"].push_back({{"type", "diagnostic"}, {"received", engine.remote_candidates},
