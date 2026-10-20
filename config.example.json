@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "server": { "url": "ws://127.0.0.1:8787/ws" },
+  "auth": { "username": "dva", "password": "replace-with-your-password" },
+  "audio": { "inputDeviceId": "default", "outputDeviceId": "default", "profile": "balanced" }
+}

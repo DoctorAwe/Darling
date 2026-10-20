@@ -1,0 +1,12 @@
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "database": "data/darling.sqlite",
+  "users": { "dva": "replace-with-dva-password", "mercy": "replace-with-mercy-password" },
+  "turn": {
+    "publicIp": "203.0.113.10",
+    "port": 3478,
+    "secret": "REPLACE_WITH_64_HEX_CHARACTERS",
+    "ttlSeconds": 3600
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "status": "core-built-apm-smoke-passed-not-integrated",
+  "webrtc": { "url": "https://webrtc.googlesource.com/src.git", "revision": "4e31d1a1ff41bb1b79609c83f998458a111a149c", "branch": "refs/branch-heads/7499", "buildRevision": "cf713174ea023af50cba4c1e4c5b450eda181341" },
+  "depotTools": { "url": "https://chromium.googlesource.com/chromium/tools/depot_tools.git", "revision": "d38909eb68d85b91259f4bf20fe5ebcd38461bc2" },
+  "target": "windows-x64-release",
+  "windowsSdk": "10.0.26100.0",
+  "allowSdkInstall": false,
+  "notes": "Existing SDK 26100 only; do not install or upgrade SDKs. Release core build and synthetic APM link/run smoke passed with explicit debugger-copy opt-out patch. PeerConnection integration and real audio quality remain unvalidated; existing AEC extraction remains separate."
+}

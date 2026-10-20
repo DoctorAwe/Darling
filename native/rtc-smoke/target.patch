@@ -1,0 +1,47 @@
+diff --git a/BUILD.gn b/BUILD.gn
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -525,6 +525,10 @@ if (!build_with_chromium) {
+     visibility = [
+       "//:default",
+       "//:webrtc_lib_link_test",
++      "//:darling_apm_smoke",
++      "//:darling_pc_smoke",
++      "//:darling_sdp_smoke",
++      "//:darling_rtc_process",
+     ]
+ 
+     sources = []
+@@ -592,6 +596,32 @@ if (!build_with_chromium) {
+     }
+   }
+ 
++  rtc_executable("darling_rtc_process") {
++    check_includes = false
++    sources = [ "../../../native/rtc-smoke/rtc_process.cc" ]
++    include_dirs = [ "../../../native/media-engine/build/_deps/json-src/include" ]
++    defines = [ "JSON_NOEXCEPTION" ]
++    deps = [ ":webrtc", "//modules/audio_device:audio_device_module_from_input_and_output" ]
++  }
++
++  rtc_executable("darling_sdp_smoke") {
++    check_includes = false
++    sources = [ "../../../native/rtc-smoke/sdp_smoke.cc" ]
++    deps = [ ":webrtc" ]
++  }
++
++  rtc_executable("darling_pc_smoke") {
++    check_includes = false
++    sources = [ "../../../native/rtc-smoke/peer_connection_smoke.cc" ]
++    deps = [ ":webrtc" ]
++  }
++
++  rtc_executable("darling_apm_smoke") {
++    check_includes = false
++    sources = [ "../../../native/rtc-smoke/audio_processing_smoke.cc" ]
++    deps = [ ":webrtc" ]
++  }
++
+   # TODO(bugs.webrtc.org/430260876): Compile webrtc lib with rust once toolchain
+   # is working.
+   if (rtc_include_tests && !is_asan && !rtc_rusty_base64) {

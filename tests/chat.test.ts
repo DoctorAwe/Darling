@@ -1,0 +1,196 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import WebSocket from 'ws';
+import { createServer } from '../apps/server/src/app';
+import { MessageStore } from '../apps/server/src/store';
+import { Session } from '../apps/desktop/src/session';
+import type { ServerPacket, User } from '../packages/protocol/src/index';
+
+async function client(url: string) {
+  const socket = new WebSocket(url);
+  const inbox: ServerPacket[] = [];
+  socket.on('message', raw => inbox.push(JSON.parse(raw.toString())));
+  await once(socket, 'open');
+  const send = (type: string, payload: unknown) => { const requestId = randomUUID(); socket.send(JSON.stringify({ version: 1, requestId, type, payload })); return requestId; };
+  const wait = async (type: string, requestId?: string) => {
+    for (let i = 0; i < 200; i++) {
+      const index = inbox.findIndex(p => p.type === type && (!requestId || ('requestId' in p && p.requestId === requestId)));
+      if (index >= 0) return inbox.splice(index, 1)[0] as any;
+      await new Promise(r => setTimeout(r, 10));
+    }
+    throw new Error(`Timed out: ${type}`);
+  };
+  const login = async (user: User, password = user + '-pass') => wait('auth.ok', send('auth.login', { username: user, password }));
+  return { socket, send, wait, login };
+}
+
+test('real WebSocket: authentication, delivery, deduplication, sync and session replacement', async () => {
+  const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' } });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const address = app.server.address() as { port: number };
+  const url = `ws://127.0.0.1:${address.port}/ws`;
+  try {
+    const bad = await client(url);
+    const error = await bad.wait('error', bad.send('auth.login', { username: 'dva', password: 'wrong' }));
+    assert.equal(error.payload.code, 'AUTH_FAILED');
+    const a = await client(url); const b = await client(url);
+    await a.login('dva'); await b.login('mercy');
+    const payload = { clientId: randomUUID(), text: '你好，Mercy 🌸' };
+    const stored = await a.wait('message.stored', a.send('message.send', payload));
+    const delivered = await b.wait('message.stored');
+    assert.equal(delivered.payload.id, stored.payload.id);
+    assert.equal(stored.payload.sender, 'dva');
+    const duplicate = await a.wait('message.stored', a.send('message.send', payload));
+    assert.equal(duplicate.payload.seq, 1);
+    const page = await b.wait('message.page', b.send('message.sync', { after: 0 }));
+    assert.equal(page.payload.messages.length, 1);
+    const replacement = await client(url); await replacement.login('dva');
+    await a.wait('session.replaced');
+    const reply = await replacement.wait('message.stored', replacement.send('message.send', { clientId: randomUUID(), text: '第二条' }));
+    assert.equal(reply.payload.seq, 2);
+    const tail = await b.wait('message.page', b.send('message.sync', { after: 1 }));
+    assert.equal(tail.payload.messages.length, 1);
+    assert.equal(tail.payload.messages[0].text, '第二条');
+  } finally { await app.close(); }
+});
+
+test('real WebSocket call signaling: auth, crossed invite, accept, replacement and stale call', async () => {
+  const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' } });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const url = `ws://127.0.0.1:${(app.server.address() as { port: number }).port}/ws`;
+  try {
+    const a = await client(url); const b = await client(url);
+    assert.equal((await a.wait('error', a.send('call.invite', {}))).payload.code, 'NOT_AUTHENTICATED');
+    await a.login('dva');
+    assert.equal((await a.wait('error', a.send('call.invite', {}))).payload.code, 'PEER_OFFLINE');
+    await b.login('mercy');
+    const first = (await a.wait('call.state', a.send('call.invite', {}))).payload.call;
+    assert.equal(first.phase, 'ringing');
+    const crossed = (await b.wait('call.state', b.send('call.invite', {}))).payload.call;
+    assert.equal(crossed.callId, first.callId);
+    assert.equal((await a.wait('error', a.send('call.accept', { callId: first.callId }))).payload.code, 'NOT_CALLEE');
+    const accepted = await b.wait('call.state', b.send('call.accept', { callId: first.callId }));
+    assert.equal(accepted.payload.call.phase, 'connecting');
+    const offer = { callId: first.callId, generation: 1, kind: 'offer', sdp: 'v=0\r\n' };
+    assert.equal((await b.wait('error', b.send('rtc.signal', offer))).payload.code, 'INVALID_RTC_STATE');
+    const ack = await a.wait('rtc.ack', a.send('rtc.signal', offer));
+    assert.equal(ack.payload.callId, first.callId);
+    const relayed = await b.wait('rtc.signal');
+    assert.equal(relayed.payload.sender, 'dva'); assert.deepEqual(relayed.payload.signal, offer);
+    const answer = { ...offer, kind: 'answer' };
+    await b.wait('rtc.ack', b.send('rtc.signal', answer));
+    assert.deepEqual((await a.wait('rtc.signal')).payload.signal, answer);
+    const ice = { callId: first.callId, generation: 1, kind: 'ice', candidate: '', sdpMid: '0', sdpMLineIndex: 0 };
+    await a.wait('rtc.ack', a.send('rtc.signal', ice));
+    assert.deepEqual((await b.wait('rtc.signal')).payload.signal, ice);
+    const replacement = await client(url); await replacement.login('dva');
+    assert.equal((await replacement.wait('call.state', replacement.send('call.sync', {}))).payload.call, null);
+    assert.equal((await b.wait('error', b.send('call.end', { callId: first.callId }))).payload.code, 'STALE_CALL');
+    assert.equal((await b.wait('error', b.send('rtc.signal', answer))).payload.code, 'INVALID_RTC_STATE');
+    const next = (await replacement.wait('call.state', replacement.send('call.invite', {}))).payload.call;
+    assert.notEqual(next.callId, first.callId);
+    // The replaced socket's late close must not tear down the new call.
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal((await b.wait('call.state', b.send('call.sync', {}))).payload.call.callId, next.callId);
+    const closed = once(replacement.socket, 'close'); replacement.socket.close(); await closed;
+    // Client close and the server's close callback are on independent event loops.
+    let remaining: unknown = next;
+    for (let i=0; i<30 && remaining; ++i) {
+      remaining = (await b.wait('call.state', b.send('call.sync', {}))).payload.call;
+      if (remaining) await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(remaining, null);
+  } finally { await app.close(); }
+});
+
+test('SQLite survives reopening and paginates without dropping messages', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'darling-db-')), 'chat.sqlite');
+  let store = new MessageStore(file);
+  const id = randomUUID(); store.save('dva', id, 'first');
+  for (let i = 0; i < 104; i++) store.save('mercy', randomUUID(), String(i));
+  store.close(); store = new MessageStore(file);
+  try {
+    assert.equal(store.save('dva', id, 'retry').message.text, 'first');
+    const page = store.page(0); assert.equal(page.messages.length, 100); assert.equal(page.hasMore, true);
+    const tail = store.page(page.next); assert.equal(tail.messages.length, 5); assert.equal(tail.next, 105);
+  } finally { store.close(); }
+});
+
+async function until(predicate: () => boolean) {
+  for (let i = 0; i < 300; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 10)); }
+  throw new Error('State timeout');
+}
+
+test('desktop receives invitations and rejects them while native RTC remains gated', async () => {
+  const secret = 'cd'.repeat(32);
+  const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' }, turn: { publicIp: '203.0.113.10', port: 3478, secret, ttlSeconds: 3600 } });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const url = `ws://127.0.0.1:${(app.server.address() as { port: number }).port}/ws`;
+  const dir = mkdtempSync(join(tmpdir(), 'darling-call-session-'));
+  const config = join(dir, 'config.json');
+  writeFileSync(config, JSON.stringify({ schemaVersion: 1, server: { url }, auth: { username: 'dva', password: 'dva-pass' } }));
+  const session = new Session(config, dir);
+  try {
+    const peer = await client(url);
+    assert.equal((await peer.wait('error', peer.send('rtc.config', {}))).payload.code, 'NOT_AUTHENTICATED');
+    const login = await peer.login('mercy');
+    assert.match(login.payload.ice.iceServers[1].username, /:mercy$/);
+    const refreshed = await peer.wait('rtc.config', peer.send('rtc.config', {}));
+    assert.match(refreshed.payload.iceServers[1].username, /:mercy$/);
+    assert.equal(JSON.stringify(refreshed).includes(secret), false);
+    session.start(); await until(() => session.state.status === 'online' && !session.state.callPending);
+    const ice = session.getIceConfig()!;
+    assert.match(ice.iceServers[1].username!, /:dva$/);
+    assert.equal(JSON.stringify(session.state).includes(ice.iceServers[1].credential!), false);
+    assert.equal(session.getIceConfig(ice.expiresAt! - 59999), undefined);
+    ice.iceServers.length = 0; assert.equal(session.getIceConfig()!.iceServers.length, 2);
+    assert.equal(session.state.call, null);
+    assert.equal(session.callAction('invite').ok, false);
+    const invited = (await peer.wait('call.state', peer.send('call.invite', {}))).payload.call;
+    await until(() => session.state.call?.callId === invited.callId);
+    assert.equal(session.callAction('accept', invited.callId).ok, false);
+    assert.equal(structuredClone(session.state).call?.phase, 'ringing');
+    assert.equal(session.callAction('end', randomUUID()).ok, false);
+    assert.equal(session.callAction('end', invited.callId).ok, true);
+    assert.equal(session.callAction('end', invited.callId).ok, false);
+    await until(() => session.state.call?.phase === 'ended' && !session.state.callPending);
+    assert.equal(structuredClone(session.state).call?.reason, 'rejected');
+    assert.equal(session.send('通话被拒绝后文字仍可用').ok, true);
+    await until(() => session.state.messages.length === 1);
+    session.stop(); assert.equal(session.state.call, null); assert.equal(session.state.callPending, false);
+    assert.equal(session.getIceConfig(), undefined);
+    session.start(); await until(() => session.state.status === 'online' && !session.state.callPending);
+    assert.equal(session.state.call, null);
+    assert.equal(session.state.mediaAvailable, false);
+  } finally { session.stop(); await app.close(); }
+});
+test('desktop session automatically logs in and restores durable queued messages', async () => {
+  const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' } });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const port = (app.server.address() as { port: number }).port;
+  const dir = mkdtempSync(join(tmpdir(), 'darling-session-'));
+  const config = join(dir, 'config.json');
+  const url = `ws://127.0.0.1:${port}/ws`;
+  writeFileSync(config, JSON.stringify({ schemaVersion: 1, server: { url }, auth: { username: 'dva', password: 'dva-pass' } }));
+  const session = new Session(config, dir);
+  try {
+    const queuedId = randomUUID();
+    writeFileSync(join(dir, `outbox-${Buffer.from(url).toString('base64url')}-dva.json`), JSON.stringify([
+      { clientId: queuedId, sender: 'dva', text: '离线待发', createdAt: new Date().toISOString() },
+    ]));
+    session.start(); await until(() => session.state.status === 'online');
+    await until(() => session.state.messages.length === 1 && session.state.pending.length === 0);
+    assert.equal(session.state.messages[0].clientId, queuedId);
+    assert.equal(session.send('持久消息').ok, true);
+    await until(() => session.state.messages.length === 2 && session.state.pending.length === 0);
+    assert.equal(JSON.stringify(session.state).includes('dva-pass'), false);
+    session.stop(); session.start();
+    await until(() => session.state.messages.length === 2);
+    assert.equal(session.state.messages[1].text, '持久消息');
+  } finally { session.stop(); await app.close(); }
+});

@@ -1,0 +1,23 @@
+node_modules/
+dist/
+*.sqlite*
+.local/
+config.json
+server.config.json
+*.log
+native/media-engine/build/
+
+# Private distribution packages and user recordings must never be committed.
+release/
+*.wav
+*.pcm
+*.raw
+*.config.json
+!*.config.example.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12

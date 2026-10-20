@@ -1,0 +1,6 @@
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "database": "data/darling.sqlite",
+  "users": { "dva": "replace-with-dva-password", "mercy": "replace-with-mercy-password" }
+}

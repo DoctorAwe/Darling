@@ -1,0 +1,17 @@
+# Replace placeholders before using; IPv4 directly assigned to the server.
+listening-port=3478
+listening-ip=PUBLIC_IPV4
+relay-ip=PUBLIC_IPV4
+min-port=49160
+max-port=49200
+fingerprint
+use-auth-secret
+static-auth-secret=REPLACE_WITH_64_HEX_CHARACTERS
+realm=darling
+no-tls
+no-dtls
+no-tcp-relay
+no-cli
+no-multicast-peers
+user-quota=8
+total-quota=32

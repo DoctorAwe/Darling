@@ -1,0 +1,15 @@
+diff --git a/vs_toolchain.py b/vs_toolchain.py
+--- a/vs_toolchain.py
++++ b/vs_toolchain.py
+@@ -459,5 +459,11 @@ def _CopyDebugger(target_dir, target_cpu):
+   msdia140.dll is needed for tools like symupload.exe and dump_syms.exe.
+   """
++  # Darling static-library build only: do not install optional SDK debuggers.
++  # Opt-in does not bypass SDK headers/libraries or compiler validation.
++  if os.environ.get('DARLING_SKIP_DEBUGGER_COPY') == '1':
++    print('Darling: skipping debugger DLL deployment for static-library build.',
++          file=sys.stderr)
++    return
+   win_sdk_dir = SetEnvironmentAndGetSDKDir()
+   if not win_sdk_dir:
+     return
