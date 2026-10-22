@@ -8,6 +8,7 @@ const elapsed = (startedAt?: number) => {
   return `${String(Math.floor(seconds / 3600)).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 };
 type Telemetry = { route: 'checking' | 'direct' | 'relay'; quality: '检测中' | '优秀' | '良好' | '较差'; rttMs?: number; loss?: number };
+const errorText = (error: unknown) => error instanceof DOMException ? `${error.name}: ${error.message}` : error instanceof Error ? error.message : String(error);
 
 function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'controller' | 'controlled') {
   const streamRef = useRef<MediaStream | undefined>(undefined); const [stream, setStream] = useState<MediaStream | undefined>(undefined);
@@ -18,9 +19,11 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
     let disposed = false; let chain = Promise.resolve(); let unsubscribe: (() => void) | undefined; let statsTimer: ReturnType<typeof setInterval> | undefined;
     const earlyIce: RTCIceCandidateInit[] = []; const signalKeys = new Set<string>(); let readySent = false;
     const send = (value: RemoteSignal) => window.darling.remoteSignal(value);
+    const report = (stage: string, value: string) => void window.darling.remoteDiagnostic(remote.sessionId, stage, value);
     const start = async () => {
       const ice = await window.darling.remoteIceConfig(); if (disposed) return;
-      const pc = new RTCPeerConnection({ iceServers: ice.iceServers, iceTransportPolicy: 'all', bundlePolicy: 'max-bundle' });
+      report('ice-config', `${ice.iceServers.length} servers`);
+      const pc = new RTCPeerConnection({ iceServers: ice.iceServers, iceTransportPolicy: 'all', bundlePolicy: 'max-bundle', iceCandidatePoolSize: 4 });
       const applySignal = async (value: RemoteSignal) => {
         if (disposed || value.sessionId !== remote.sessionId) return;
         const key = JSON.stringify(value); if (signalKeys.has(key)) return; signalKeys.add(key);
@@ -30,29 +33,42 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
         }
         await pc.setRemoteDescription({ type: value.kind, sdp: value.sdp });
         if (value.kind === 'offer') {
-          const capture = await navigator.mediaDevices.getDisplayMedia({ video: { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 60, max: 60 } }, audio: remote.permissions.audio });
+          const videoConstraints = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 60, max: 60 } };
+          let capture: MediaStream;
+          try { capture = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: remote.permissions.audio }); }
+          catch (error) {
+            report('capture', errorText(error));
+            if (!remote.permissions.audio) throw error;
+            setDetail('系统声音不可用，正在仅共享画面');
+            capture = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: false });
+          }
           if (disposed) { capture.getTracks().forEach(track => track.stop()); return; }
+          report('capture-ready', capture.getTracks().map(track => track.kind).join(','));
+          let videoSender: RTCRtpSender | undefined;
           streamRef.current = capture;
           for (const track of capture.getTracks()) {
             if (track.kind === 'video') track.contentHint = 'detail';
             const sender = pc.addTrack(track, capture);
-            if (track.kind === 'video') {
-              const parameters = sender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-              parameters.encodings[0].maxBitrate = 16_000_000; parameters.encodings[0].maxFramerate = 60; await sender.setParameters(parameters);
-            }
+            if (track.kind === 'video') videoSender = sender;
           }
           capture.getVideoTracks()[0]?.addEventListener('ended', () => { if (!disposed) void window.darling.remoteAction('end', remote.sessionId); });
           const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
+          if (videoSender) {
+            const parameters = videoSender.getParameters();
+            if (parameters.encodings?.length) { parameters.encodings[0].maxBitrate = 16_000_000; parameters.encodings[0].maxFramerate = 60; await videoSender.setParameters(parameters); }
+          }
           await send({ sessionId: remote.sessionId, generation: 1, kind: 'answer', sdp: answer.sdp! });
         }
         for (const candidate of earlyIce.splice(0)) await pc.addIceCandidate(candidate);
       };
-      const enqueue = (value: RemoteSignal) => { chain = chain.then(() => applySignal(value)).catch(() => setDetail('媒体协商失败')); };
+      const enqueue = (value: RemoteSignal) => { chain = chain.then(() => applySignal(value)).catch(error => { const detail = errorText(error); report('signal', detail); setDetail(`媒体协商失败 · ${detail}`); }); };
       pc.onicecandidate = event => { if (event.candidate) void send({ sessionId: remote.sessionId, generation: 1, kind: 'ice', candidate: event.candidate.candidate, sdpMid: event.candidate.sdpMid, sdpMLineIndex: event.candidate.sdpMLineIndex }); };
+      pc.onicecandidateerror = event => report('ice-candidate', `${event.errorCode} ${event.errorText}`);
+      pc.oniceconnectionstatechange = () => { report('ice-state', pc.iceConnectionState); if (pc.iceConnectionState === 'checking') setDetail('正在验证直连与中继路径'); };
       pc.ontrack = event => { const received = event.streams[0] ?? new MediaStream([event.track]); streamRef.current = received; setStream(received); };
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === 'connected') { setDetail('远程画面已连接'); if (!readySent) { readySent = true; void window.darling.remoteReady(remote.sessionId); } }
-        else if (pc.connectionState === 'failed') { setDetail('连接失败'); void window.darling.remoteAction('end', remote.sessionId); }
+        else if (pc.connectionState === 'failed') { setDetail('连接失败，请检查两端网络或查看远程诊断日志'); report('connection', 'failed'); }
         else if (pc.connectionState === 'disconnected') setDetail('网络中断，正在恢复');
       };
       if (role === 'controller') {
@@ -78,12 +94,12 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
         const quality: Telemetry['quality'] = (rttMs ?? 0) > 180 || loss > .04 ? '较差' : (rttMs ?? 0) > 80 || loss > .015 ? '良好' : '优秀';
         setTelemetry({ route, quality, rttMs, loss });
         if (role === 'controlled') for (const sender of pc.getSenders()) if (sender.track?.kind === 'video') {
-          const parameters = sender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = route === 'direct' ? 28_000_000 : 16_000_000; await sender.setParameters(parameters).catch(() => {});
+          const parameters = sender.getParameters(); if (parameters.encodings?.length) { parameters.encodings[0].maxBitrate = route === 'direct' ? 28_000_000 : 16_000_000; await sender.setParameters(parameters).catch(() => {}); }
         }
       }, 2000);
       return pc;
     };
-    let pc: RTCPeerConnection | undefined; void start().then(value => { pc = value; }).catch(() => setDetail('无法启动远程媒体'));
+    let pc: RTCPeerConnection | undefined; void start().then(value => { pc = value; }).catch(error => { const detail = errorText(error); report('startup', detail); setDetail(`无法启动远程媒体 · ${detail}`); });
     return () => { disposed = true; unsubscribe?.(); clearInterval(statsTimer); controlRef.current = undefined; setControlReady(false); pc?.close(); streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = undefined; setStream(undefined); };
   }, [remote?.sessionId, role]);
   useEffect(() => { for (const track of streamRef.current?.getAudioTracks() ?? []) track.enabled = !!remote?.permissions.audio; }, [remote?.permissions.audio]);
@@ -108,7 +124,7 @@ export function RemoteDesktopSurface({ surface, state }: { surface: 'remote-cont
     media.sendControl({ type: 'pointer.move', ...point });
     if (down !== undefined && [0, 1, 2].includes(event.button)) media.sendControl({ type: 'pointer.button', button: (['left', 'middle', 'right'] as const)[event.button], down });
   };
-  if (!remote || !['connecting', 'active'].includes(remote.phase)) return <div className={`remote-surface ${surface}`}><span>远程桌面会话已结束</span></div>;
+  if (!remote || !['connecting', 'active'].includes(remote.phase)) return <div className={`remote-surface ${surface} remote-ended`}><Icon name="desktop"/><h1>远程桌面未能建立</h1><p>{remote?.reason === 'timeout' ? '连接协商超时。请保留此窗口并检查两台电脑的 remote-desktop.log。' : '远程桌面会话已结束。'}</p>{surface === 'remote-control' && <button onClick={() => window.darling.window('close')}>关闭窗口</button>}</div>;
   const end = () => void window.darling.remoteAction('end', remote.sessionId); const route = media.telemetry.route === 'direct' ? '直连' : media.telemetry.route === 'relay' ? '服务器中继' : '检测中';
   if (surface === 'remote-status') return <div className="remote-surface remote-status"><span className="remote-live-dot"/><strong>正在被 {names[remote.controller]} 远程连接</strong><time>{elapsed(remote.startedAt)}</time><span className="quality">网络 · {media.telemetry.quality}</span><button aria-pressed={remote.permissions.control} onClick={() => void window.darling.remotePermissions(remote.sessionId, { ...remote.permissions, control: !remote.permissions.control })}>{remote.permissions.control ? '允许操作' : '仅观看'}</button><button aria-pressed={remote.permissions.audio} onClick={() => void window.darling.remotePermissions(remote.sessionId, { ...remote.permissions, audio: !remote.permissions.audio })}>{remote.permissions.audio ? '声音已开' : '声音关闭'}</button><button className="remote-end" onClick={end}>断开</button></div>;
   return <div className="remote-surface remote-control"><header><div><strong>{names[remote.controlled]} 的桌面</strong><span>{remote.phase === 'active' ? elapsed(remote.startedAt) : media.detail}</span></div><div><span>连接路径 · {route}</span><span>网络 · {media.telemetry.quality}{media.telemetry.rttMs === undefined ? '' : ` · ${media.telemetry.rttMs}ms`}</span><span>{canControl ? '可操作' : '仅观看'}</span><span>{remote.permissions.audio ? '声音开启' : '声音关闭'}</span><button className="remote-end" onClick={end}>断开连接</button></div></header><div className={`remote-stage ${canControl ? 'interactive' : ''}`} tabIndex={canControl ? 0 : -1} onPointerMove={event => sendPointer(event)} onPointerDown={event => { event.currentTarget.focus(); event.currentTarget.setPointerCapture(event.pointerId); sendPointer(event, true); }} onPointerUp={event => { sendPointer(event, false); event.currentTarget.releasePointerCapture(event.pointerId); }} onWheel={event => { if (canControl) { event.preventDefault(); media.sendControl({ type: 'pointer.wheel', deltaX: Math.max(-1200, Math.min(1200, Math.round(event.deltaX))), deltaY: Math.max(-1200, Math.min(1200, Math.round(event.deltaY))) }); } }} onKeyDown={event => { if (canControl && !event.repeat && RemoteInputEvent.safeParse({ type: 'key', code: event.code, down: true }).success) { event.preventDefault(); media.sendControl({ type: 'key', code: event.code, down: true }); } }} onKeyUp={event => { if (canControl && RemoteInputEvent.safeParse({ type: 'key', code: event.code, down: false }).success) { event.preventDefault(); media.sendControl({ type: 'key', code: event.code, down: false }); } }} onBlur={() => media.sendControl({ type: 'release' })} onContextMenu={event => { if (canControl) event.preventDefault(); }}>{media.stream ? <video ref={video} autoPlay playsInline/> : <><Icon name="desktop"/><h1>正在准备远程画面</h1><p>{media.detail}</p></>}</div></div>;

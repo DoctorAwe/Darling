@@ -15,6 +15,7 @@ const api: DesktopApi = {
     return () => ipcRenderer.removeListener('remote:signal', handler);
   },
   remoteInput: (sessionId, event) => ipcRenderer.invoke('remote:input', sessionId, event),
+  remoteDiagnostic: (sessionId, stage, detail) => ipcRenderer.invoke('remote:diagnostic', sessionId, stage, detail),
   voiceConfigure: value => ipcRenderer.invoke('voice:configure', value),
   rtcDeviceSnapshot: () => ipcRenderer.invoke('rtc-device:snapshot'),
   rtcDeviceStart: value => ipcRenderer.invoke('rtc-device:start', value),

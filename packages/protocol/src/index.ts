@@ -125,6 +125,7 @@ export interface DesktopApi {
   remoteDrainSignals(sessionId: string): Promise<RemoteSignal[]>;
   subscribeRemoteSignal(listener: (signal: RemoteSignal) => void): () => void;
   remoteInput(sessionId: string, event: RemoteInputEvent): Promise<void>;
+  remoteDiagnostic(sessionId: string, stage: string, detail: string): Promise<void>;
   mediaSnapshot(): Promise<MediaState>;
   mediaInspect(): Promise<MediaState>;
   audioPreferenceGet(pair: { inputId: string; outputId: string }): Promise<{ aecEnabled: boolean; saved: boolean }>;

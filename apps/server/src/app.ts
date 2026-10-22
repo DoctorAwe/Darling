@@ -28,7 +28,7 @@ export async function createServer(options: { database: string; users: Record<Us
   });
   const remotes = new RemoteDesktops(session => {
     for (const socket of sessions.values()) send(socket, { version: 1, type: 'remote.state', payload: { session } });
-  });
+  }, 90000);
   await app.register(websocket, { options: { maxPayload: 64 * 1024 } });
   app.get('/health', async () => ({ ok: true, protocolVersion: 1, media: false }));
   app.get('/ws', { websocket: true }, socket => {

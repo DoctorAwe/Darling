@@ -8,7 +8,7 @@ import { resolveAudioPair, defaultCallAudio, isHeadphoneOutput } from './audio-p
 import { RtcNegotiation } from './rtc-negotiation';
 import { RtcDeviceTest } from './rtc-device-test';
 import { DeviceAudio } from './rtc-process';
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { resolveAec3Enabled } from './aec-mode';
 import { RemoteSignal } from '../../../packages/protocol/src/index';
 import { RemoteInputGate, RemoteInputHost } from './remote-input';
@@ -78,6 +78,12 @@ void app.whenReady().then(() => {
     const remote = session.state.remote;
     if (typeof sessionId !== 'string' || !remote || remote.sessionId !== sessionId || remote.controlled !== session.state.user || !remote.permissions.control || !['connecting', 'active'].includes(remote.phase) || !remoteStatusWindow || remoteStatusWindow.isDestroyed() || event.sender.id !== remoteStatusWindow.webContents.id) throw new Error('当前未授权远程操作');
     await remoteInput.send(remoteInputGate.parse(value));
+  });
+  ipcMain.handle('remote:diagnostic', (event, sessionId: unknown, stage: unknown, detail: unknown) => {
+    const remote = session.state.remote;
+    const allowedSender = [remoteControlWindow, remoteStatusWindow].some(target => target && !target.isDestroyed() && target.webContents.id === event.sender.id);
+    if (typeof sessionId !== 'string' || remote?.sessionId !== sessionId || typeof stage !== 'string' || typeof detail !== 'string' || stage.length > 64 || detail.length > 500 || !allowedSender) return;
+    appendFileSync(join(app.getPath('userData'), 'remote-desktop.log'), `${JSON.stringify({ at: new Date().toISOString(), sessionId, role: remote.controller === session.state.user ? 'controller' : 'controlled', stage, detail })}\n`, 'utf8');
   });
   ipcMain.handle('voice:audio', async (_event, callId: unknown, micMuted: unknown, speakerMuted: unknown) => {
     if (typeof callId !== 'string' || typeof micMuted !== 'boolean' || typeof speakerMuted !== 'boolean' ||
@@ -171,6 +177,10 @@ void app.whenReady().then(() => {
     remoteWindow.setMenuBarVisibility(false);
     remoteWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     remoteWindow.webContents.on('will-navigate', event => event.preventDefault());
+    remoteWindow.webContents.on('render-process-gone', (_event, details) => {
+      const remote = session.state.remote;
+      if (remote) appendFileSync(join(app.getPath('userData'), 'remote-desktop.log'), `${JSON.stringify({ at: new Date().toISOString(), sessionId: remote.sessionId, role: surface, stage: 'renderer-gone', detail: `${details.reason}:${details.exitCode}` })}\n`, 'utf8');
+    });
     remoteWindow.once('ready-to-show', () => {
       if (controlled) {
         const { x, y, width } = screen.getPrimaryDisplay().workArea;
@@ -193,7 +203,7 @@ void app.whenReady().then(() => {
   });
   const syncRemoteWindows = (state: typeof session.state) => {
     const remote = state.remote; const live = remote && ['connecting', 'active'].includes(remote.phase);
-    const controller = live && remote.controller === state.user;
+    const controller = !!remote && remote.controller === state.user && (live || remote.phase === 'ended');
     const controlled = live && remote.controlled === state.user;
     if (controller && !remoteControlWindow) remoteControlWindow = openRemoteSurface('remote-control');
     if (controlled && !remoteStatusWindow) remoteStatusWindow = openRemoteSurface('remote-status');
