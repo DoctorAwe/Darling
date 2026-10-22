@@ -23,6 +23,11 @@ export class Session extends EventEmitter {
     this.transmit({ version: 1, type: 'remote.signal', requestId: randomUUID(), payload: parsed });
   }
   remoteReady(sessionId: string) { this.transmit({ version: 1, type: 'remote.ready', requestId: randomUUID(), payload: { sessionId } }); }
+  attachmentConnection() {
+    if (!this.config || this.state.status !== 'online') throw new Error('当前未连接服务器');
+    const url = new URL(this.config.server.url); url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:'; url.pathname = ''; url.search = ''; url.hash = '';
+    return { baseUrl: url.toString().replace(/\/$/, ''), user: this.config.auth.username, password: this.config.auth.password };
+  }
   configureVoice(enabled: boolean, configured: boolean) {
     this.state.voiceBeta = enabled; this.state.voiceConfigured = configured; this.state.mediaAvailable = enabled && configured; this.emitState();
   }

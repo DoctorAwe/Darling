@@ -1,5 +1,5 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, screen, session as electronSession, webContents } from 'electron';
-import { join, resolve } from 'node:path';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session as electronSession, webContents } from 'electron';
+import { basename, extname, join, resolve } from 'node:path';
 import { release } from 'node:os';
 import { Session } from './session';
 import { MediaHost } from './media';
@@ -8,7 +8,8 @@ import { resolveAudioPair, defaultCallAudio, isHeadphoneOutput } from './audio-p
 import { RtcNegotiation } from './rtc-negotiation';
 import { RtcDeviceTest } from './rtc-device-test';
 import { DeviceAudio } from './rtc-process';
-import { appendFileSync, existsSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { resolveAec3Enabled } from './aec-mode';
 import { RemoteSignal } from '../../../packages/protocol/src/index';
 import { RemoteInputGate, RemoteInputHost } from './remote-input';
@@ -26,6 +27,9 @@ let remoteControlWindow: BrowserWindow | undefined;
 let remoteStatusWindow: BrowserWindow | undefined;
 let remoteInput: RemoteInputHost;
 const remoteInputGate = new RemoteInputGate();
+type PendingAttachment = { token: string; name: string; mime: string; size: number; image: boolean; path?: string; data?: Buffer; clientId: string };
+const pendingAttachments = new Map<string, PendingAttachment>();
+const mimeFor = (name: string) => ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.txt': 'text/plain', '.pdf': 'application/pdf', '.zip': 'application/zip' } as Record<string, string>)[extname(name).toLowerCase()] ?? 'application/octet-stream';
 const pendingRemoteSignals: Array<ReturnType<typeof RemoteSignal.parse>> = [];
 let media: MediaHost;
 let rtcNegotiation: RtcNegotiation | undefined;
@@ -97,6 +101,42 @@ void app.whenReady().then(() => {
     await rtcNegotiation.setAudio(callId, micMuted, speakerMuted);
   });
   ipcMain.handle('session:send', (_event, text: unknown) => typeof text === 'string' ? session.send(text) : { ok: false, error: '无效消息' });
+  ipcMain.handle('attachment:pick', async () => {
+    const result = await dialog.showOpenDialog(window, { title: '选择要发送的文件', properties: ['openFile', 'multiSelections'] }); if (result.canceled) return [];
+    const selected: PendingAttachment[] = [];
+    for (const path of result.filePaths.slice(0, 10)) {
+      const size = statSync(path).size; if (size > 128 * 1024 * 1024) continue;
+      const name = basename(path), mime = mimeFor(name), item = { token: randomUUID(), clientId: randomUUID(), name, mime, size, image: mime.startsWith('image/'), path };
+      pendingAttachments.set(item.token, item); selected.push(item);
+    }
+    return selected.map(({ token, name, mime, size, image }) => ({ token, name, mime, size, image }));
+  });
+  ipcMain.handle('attachment:screenshot', async () => {
+    const display = screen.getPrimaryDisplay(); const width = Math.max(1, Math.round(display.size.width * display.scaleFactor)), height = Math.max(1, Math.round(display.size.height * display.scaleFactor));
+    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width, height }, fetchWindowIcons: false });
+    const source = sources.find(value => value.display_id === String(display.id)) ?? sources[0]; if (!source || source.thumbnail.isEmpty()) throw new Error('无法截取主显示器');
+    const data = source.thumbnail.toPNG(); const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19); const item: PendingAttachment = { token: randomUUID(), clientId: randomUUID(), name: `截图-${stamp}.png`, mime: 'image/png', size: data.length, image: true, data };
+    pendingAttachments.set(item.token, item); return { token: item.token, name: item.name, mime: item.mime, size: item.size, image: true };
+  });
+  ipcMain.handle('attachment:discard', (_event, token: unknown) => { if (typeof token === 'string') pendingAttachments.delete(token); });
+  ipcMain.handle('attachment:send', async (_event, token: unknown) => {
+    if (typeof token !== 'string') return { ok: false, error: '附件无效' }; const item = pendingAttachments.get(token); if (!item) return { ok: false, error: '附件已失效，请重新选择' };
+    try {
+      const connection = session.attachmentConnection(); const data = item.data ?? readFileSync(item.path!);
+      const response = await fetch(`${connection.baseUrl}/attachments`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'x-darling-user': connection.user, 'x-darling-password': connection.password, 'x-client-id': item.clientId, 'x-file-name': encodeURIComponent(item.name), 'x-mime-type': item.mime }, body: Uint8Array.from(data) });
+      if (!response.ok) throw new Error(`服务器拒绝附件 (${response.status})`); pendingAttachments.delete(token); return { ok: true };
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : '附件发送失败' }; }
+  });
+  const readAttachment = async (id: string) => {
+    const connection = session.attachmentConnection(); const response = await fetch(`${connection.baseUrl}/attachments/${encodeURIComponent(id)}`, { headers: { 'x-darling-user': connection.user, 'x-darling-password': connection.password } });
+    if (!response.ok) throw new Error(`无法读取附件 (${response.status})`); return { data: await response.arrayBuffer(), mime: response.headers.get('content-type') ?? 'application/octet-stream' };
+  };
+  ipcMain.handle('attachment:read', (_event, id: unknown) => typeof id === 'string' ? readAttachment(id) : Promise.reject(new Error('附件无效')));
+  ipcMain.handle('attachment:save', async (_event, id: unknown, suggestedName: unknown) => {
+    if (typeof id !== 'string' || typeof suggestedName !== 'string') return { ok: false, error: '附件无效' };
+    const result = await dialog.showSaveDialog(window, { defaultPath: basename(suggestedName), title: '保存附件' }); if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+    try { const attachment = await readAttachment(id); writeFileSync(result.filePath, Buffer.from(attachment.data)); return { ok: true }; } catch (error) { return { ok: false, error: error instanceof Error ? error.message : '保存失败' }; }
+  });
   ipcMain.handle('session:reload', () => session.start());
   ipcMain.handle('voice:configure', (_event, value: unknown) => {
     if (!voiceBeta || (session.state.call && session.state.call.phase !== 'ended') || rtcDeviceTest.active || mediaStarting || media.state.capture?.running || media.state.playback?.running) throw new Error('当前不能配置通话设备');

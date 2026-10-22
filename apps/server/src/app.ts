@@ -1,17 +1,25 @@
 import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import type { WebSocket } from 'ws';
-import { ClientPacket, type ServerPacket, type User } from '../../../packages/protocol/src/index';
+import { ClientPacket, User, type ServerPacket } from '../../../packages/protocol/src/index';
 import { MessageStore } from './store';
 import { Calls } from './calls';
 import { otherUser } from '../../../packages/protocol/src/index';
 import { TurnConfig, issueIce } from './ice';
 import { RemoteDesktops } from './remote-desktops';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { Attachment } from '../../../packages/protocol/src/index';
 
-export async function createServer(options: { database: string; users: Record<User, string>; turn?: TurnConfig }) {
+export async function createServer(options: { database: string; users: Record<User, string>; turn?: TurnConfig; attachmentsDir?: string }) {
   const turn = options.turn === undefined ? undefined : TurnConfig.parse(options.turn);
   const app = Fastify({ logger: false });
   const store = new MessageStore(options.database);
+  const temporaryAttachments = options.database === ':memory:' && !options.attachmentsDir;
+  const attachmentsDir = options.attachmentsDir ?? (temporaryAttachments ? mkdtempSync(join(tmpdir(), 'darling-attachments-')) : join(dirname(options.database), 'attachments'));
+  mkdirSync(attachmentsDir, { recursive: true });
   const sessions = new Map<User, WebSocket>();
   const sockets = new Set<WebSocket>();
   const send = (socket: WebSocket, packet: ServerPacket) => {
@@ -23,6 +31,13 @@ export async function createServer(options: { database: string; users: Record<Us
     const packet: ServerPacket = { version: 1, type: 'presence.changed', payload: { online: [...sessions.keys()] } };
     for (const socket of sessions.values()) send(socket, packet);
   };
+  const publishMessage = (message: ReturnType<MessageStore['page']>['messages'][number]) => {
+    for (const socket of sessions.values()) send(socket, { version: 1, type: 'message.stored', payload: message });
+  };
+  const httpUser = (headers: Record<string, string | string[] | undefined>) => {
+    const parsed = User.safeParse(headers['x-darling-user']); const password = headers['x-darling-password'];
+    return parsed.success && typeof password === 'string' && options.users[parsed.data] === password && sessions.has(parsed.data) ? parsed.data : undefined;
+  };
   const calls = new Calls(call => {
     for (const socket of sessions.values()) send(socket, { version: 1, type: 'call.state', payload: { call } });
   });
@@ -30,7 +45,27 @@ export async function createServer(options: { database: string; users: Record<Us
     for (const socket of sessions.values()) send(socket, { version: 1, type: 'remote.state', payload: { session } });
   }, 30000);
   await app.register(websocket, { options: { maxPayload: 64 * 1024 } });
+  app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer', bodyLimit: 128 * 1024 * 1024 }, (_request, body, done) => done(null, body));
   app.get('/health', async () => ({ ok: true, protocolVersion: 1, media: false }));
+  app.post('/attachments', { bodyLimit: 128 * 1024 * 1024 }, async (request, reply) => {
+    const user = httpUser(request.headers); if (!user) return reply.code(401).send({ error: 'AUTH_REQUIRED' });
+    const clientId = request.headers['x-client-id']; const encodedName = request.headers['x-file-name']; const mime = request.headers['x-mime-type']; const body = request.body;
+    if (typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId) || typeof encodedName !== 'string' || typeof mime !== 'string' || !Buffer.isBuffer(body)) return reply.code(400).send({ error: 'INVALID_ATTACHMENT' });
+    let name = ''; try { name = decodeURIComponent(encodedName).replace(/[\\/\0-\x1f]/g, '_').trim(); } catch { return reply.code(400).send({ error: 'INVALID_NAME' }); }
+    const attachment = Attachment.safeParse({ id: randomUUID(), name, mime, size: body.length }); if (!attachment.success) return reply.code(400).send({ error: 'INVALID_ATTACHMENT' });
+    const path = join(attachmentsDir, `${attachment.data.id}.bin`); writeFileSync(path, body, { flag: 'wx' });
+    try {
+      const result = store.saveAttachment(user, clientId, attachment.data, path);
+      if (!result.inserted) rmSync(path, { force: true }); else publishMessage(result.message);
+      return reply.code(result.inserted ? 201 : 200).send({ message: result.message });
+    } catch (error) { rmSync(path, { force: true }); throw error; }
+  });
+  app.get('/attachments/:id', async (request, reply) => {
+    const user = httpUser(request.headers); if (!user) return reply.code(401).send({ error: 'AUTH_REQUIRED' });
+    const id = (request.params as { id?: string }).id; const attachment = typeof id === 'string' ? store.attachment(id) : undefined;
+    if (!attachment) return reply.code(404).send({ error: 'NOT_FOUND' });
+    return reply.type(attachment.mime).header('content-length', attachment.size).header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(attachment.name)}`).send(readFileSync(attachment.path));
+  });
   app.get('/ws', { websocket: true }, socket => {
     sockets.add(socket);
     let user: User | undefined;
@@ -131,6 +166,9 @@ export async function createServer(options: { database: string; users: Record<Us
     });
   });
   app.addHook('preClose', async () => { calls.disconnect('server-shutdown'); remotes.disconnect('server-shutdown'); for (const socket of sockets) socket.terminate(); });
-  app.addHook('onClose', async () => store.close());
+  app.addHook('onClose', async () => {
+    store.close();
+    if (temporaryAttachments) rmSync(attachmentsDir, { recursive: true, force: true });
+  });
   return app;
 }

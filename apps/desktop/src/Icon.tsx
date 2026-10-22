@@ -1,4 +1,4 @@
-export type IconName = 'phone' | 'mic' | 'speaker' | 'chat' | 'settings' | 'send' | 'desktop';
+export type IconName = 'phone' | 'mic' | 'speaker' | 'chat' | 'settings' | 'send' | 'desktop' | 'plus' | 'file' | 'camera' | 'download';
 const paths: Record<IconName, string> = {
   phone: 'M5 3h4l2 5-3 2a15 15 0 0 0 6 6l2-3 5 2v4a2 2 0 0 1-2 2C10 21 3 14 3 5a2 2 0 0 1 2-2Z',
   mic: 'M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8',
@@ -7,6 +7,10 @@ const paths: Record<IconName, string> = {
   settings: 'M4 7h16M4 17h16M8 4v6M16 14v6',
   send: 'm5 12 14-7-7 14-1-7-6 0ZM11 12l8-7',
   desktop: 'M3 4h18v13H3V4Zm6 17h6M12 17v4',
+  plus: 'M12 5v14M5 12h14',
+  file: 'M6 2h8l4 4v16H6V2Zm8 0v5h5',
+  camera: 'M4 7h3l2-3h6l2 3h3v13H4V7Zm8 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z',
+  download: 'M12 3v12m-5-5 5 5 5-5M4 20h16',
 };
 export function Icon({ name, muted = false }: { name: IconName; muted?: boolean }) {
   return <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]}/>{muted && <path d="M3 3l18 18"/>}</svg>;

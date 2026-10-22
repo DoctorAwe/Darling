@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { Message, User } from '../../../packages/protocol/src/index';
+import type { Attachment, Message, User } from '../../../packages/protocol/src/index';
 
 export class MessageStore {
   private db: DatabaseSync;
@@ -15,10 +15,20 @@ export class MessageStore {
         text TEXT NOT NULL, seq INTEGER NOT NULL UNIQUE, createdAt TEXT NOT NULL,
         conversationId TEXT NOT NULL DEFAULT 'dva-mercy', UNIQUE(sender, clientId));
       INSERT OR IGNORE INTO schema_migrations VALUES(1);`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS attachments(
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL);
+      INSERT OR IGNORE INTO schema_migrations VALUES(2);`);
+    const columns = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === 'attachmentId')) this.db.exec('ALTER TABLE messages ADD COLUMN attachmentId TEXT REFERENCES attachments(id)');
+  }
+  private row(value: Record<string, unknown>): Message {
+    const attachment = value.attachmentId ? { id: value.attachmentId, name: value.attachmentName, mime: value.attachmentMime, size: value.attachmentSize } as Attachment : undefined;
+    return { id: value.id, clientId: value.clientId, sender: value.sender, text: value.text, seq: value.seq, createdAt: value.createdAt, ...(attachment ? { attachment } : {}) } as Message;
   }
   save(sender: User, clientId: string, text: string): { message: Message; inserted: boolean } {
-    const existing = this.db.prepare('SELECT id,clientId,sender,text,seq,createdAt FROM messages WHERE sender=? AND clientId=?').get(sender, clientId) as Message | undefined;
-    if (existing) return { message: existing, inserted: false };
+    const existing = this.db.prepare(`SELECT m.id,m.clientId,m.sender,m.text,m.seq,m.createdAt,m.attachmentId,a.name attachmentName,a.mime attachmentMime,a.size attachmentSize
+      FROM messages m LEFT JOIN attachments a ON a.id=m.attachmentId WHERE m.sender=? AND m.clientId=?`).get(sender, clientId) as Record<string, unknown> | undefined;
+    if (existing) return { message: this.row(existing), inserted: false };
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const { next_seq } = this.db.prepare("SELECT next_seq FROM conversations WHERE id='dva-mercy'").get() as { next_seq: number };
@@ -28,9 +38,24 @@ export class MessageStore {
       return { message, inserted: true };
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
+  saveAttachment(sender: User, clientId: string, attachment: Attachment, path: string): { message: Message; inserted: boolean } {
+    const existing = this.db.prepare(`SELECT m.id,m.clientId,m.sender,m.text,m.seq,m.createdAt,m.attachmentId,a.name attachmentName,a.mime attachmentMime,a.size attachmentSize
+      FROM messages m LEFT JOIN attachments a ON a.id=m.attachmentId WHERE m.sender=? AND m.clientId=?`).get(sender, clientId) as Record<string, unknown> | undefined;
+    if (existing) return { message: this.row(existing), inserted: false };
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const { next_seq } = this.db.prepare("SELECT next_seq FROM conversations WHERE id='dva-mercy'").get() as { next_seq: number };
+      const message: Message = { id: randomUUID(), clientId, sender, text: '', attachment, seq: next_seq, createdAt: new Date().toISOString() };
+      this.db.prepare('INSERT INTO attachments(id,name,mime,size,path) VALUES(?,?,?,?,?)').run(attachment.id, attachment.name, attachment.mime, attachment.size, path);
+      this.db.prepare('INSERT INTO messages(id,clientId,sender,text,seq,createdAt,attachmentId) VALUES(?,?,?,?,?,?,?)').run(message.id, clientId, sender, '', next_seq, message.createdAt, attachment.id);
+      this.db.exec("UPDATE conversations SET next_seq=next_seq+1 WHERE id='dva-mercy'; COMMIT"); return { message, inserted: true };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  attachment(id: string) { return this.db.prepare('SELECT id,name,mime,size,path FROM attachments WHERE id=?').get(id) as (Attachment & { path: string }) | undefined; }
   page(after: number) {
-    const rows = this.db.prepare('SELECT id,clientId,sender,text,seq,createdAt FROM messages WHERE seq>? ORDER BY seq LIMIT 101').all(after) as Message[];
-    const messages = rows.slice(0, 100);
+    const rows = this.db.prepare(`SELECT m.id,m.clientId,m.sender,m.text,m.seq,m.createdAt,m.attachmentId,a.name attachmentName,a.mime attachmentMime,a.size attachmentSize
+      FROM messages m LEFT JOIN attachments a ON a.id=m.attachmentId WHERE m.seq>? ORDER BY m.seq LIMIT 101`).all(after) as Array<Record<string, unknown>>;
+    const messages = rows.slice(0, 100).map(row => this.row(row));
     return { messages, hasMore: rows.length > 100, next: messages.at(-1)?.seq ?? after };
   }
   close() { this.db.close(); }

@@ -65,7 +65,9 @@ export const ClientPacket = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('message.sync'), payload: z.object({ after: z.number().int().min(0) }) }),
 ]);
 export type ClientPacket = z.infer<typeof ClientPacket>;
-export const Message = z.object({ id: z.string(), clientId: z.string(), sender: User, text: z.string(), seq: z.number().int(), createdAt: z.string() });
+export const Attachment = z.object({ id: z.string().uuid(), name: z.string().min(1).max(255), mime: z.string().min(1).max(128), size: z.number().int().nonnegative().max(128 * 1024 * 1024) }).strict();
+export type Attachment = z.infer<typeof Attachment>;
+export const Message = z.object({ id: z.string(), clientId: z.string(), sender: User, text: z.string(), attachment: Attachment.optional(), seq: z.number().int(), createdAt: z.string() });
 export type Message = z.infer<typeof Message>;
 export const ServerPacket = z.discriminatedUnion('type', [
   z.object({ version: z.literal(1), type: z.literal('rtc.config'), requestId: z.string(), payload: IceConfig }),
@@ -115,6 +117,12 @@ export interface DesktopApi {
   snapshot(): Promise<Snapshot>;
   subscribe(listener: (snapshot: Snapshot) => void): () => void;
   send(text: string): Promise<{ ok: boolean; error?: string }>;
+  attachmentPick(): Promise<Array<{ token: string; name: string; mime: string; size: number; image: boolean }>>;
+  attachmentScreenshot(): Promise<{ token: string; name: string; mime: string; size: number; image: boolean }>;
+  attachmentDiscard(token: string): Promise<void>;
+  attachmentSend(token: string): Promise<{ ok: boolean; error?: string }>;
+  attachmentRead(id: string): Promise<{ data: ArrayBuffer; mime: string }>;
+  attachmentSave(id: string, suggestedName: string): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>;
   reload(): Promise<void>;
   callAction(action: 'invite' | 'accept' | 'end', callId?: string): Promise<{ ok: boolean; error?: string }>;
   remoteAction(action: 'invite' | 'accept' | 'end', sessionId?: string, permissions?: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;

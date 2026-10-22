@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -57,6 +57,51 @@ test('real WebSocket: authentication, delivery, deduplication, sync and session 
     assert.equal(tail.payload.messages.length, 1);
     assert.equal(tail.payload.messages[0].text, '第二条');
   } finally { await app.close(); }
+});
+
+test('authenticated attachment upload broadcasts, persists and downloads exact bytes', async () => {
+  const attachmentsDir = mkdtempSync(join(tmpdir(), 'darling-files-'));
+  const app = await createServer({ database: ':memory:', attachmentsDir, users: { dva: 'dva-pass', mercy: 'mercy-pass' } });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const port = (app.server.address() as { port: number }).port;
+  const url = `ws://127.0.0.1:${port}/ws`;
+  try {
+    const a = await client(url); const b = await client(url);
+    await a.login('dva'); await b.login('mercy');
+    const clientId = randomUUID();
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const response = await fetch(`http://127.0.0.1:${port}/attachments`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'x-darling-user': 'dva',
+        'x-darling-password': 'dva-pass',
+        'x-client-id': clientId,
+        'x-file-name': encodeURIComponent('截图 01.png'),
+        'x-mime-type': 'image/png',
+      },
+      body: bytes,
+    });
+    assert.equal(response.status, 201);
+    const delivered = await b.wait('message.stored');
+    assert.equal(delivered.payload.text, '');
+    assert.deepEqual(delivered.payload.attachment, { id: delivered.payload.attachment.id, name: '截图 01.png', mime: 'image/png', size: bytes.length });
+    const own = await a.wait('message.stored');
+    assert.equal(own.payload.id, delivered.payload.id);
+
+    const page = await b.wait('message.page', b.send('message.sync', { after: 0 }));
+    assert.equal(page.payload.messages[0].attachment.name, '截图 01.png');
+    const download = await fetch(`http://127.0.0.1:${port}/attachments/${delivered.payload.attachment.id}`, {
+      headers: { 'x-darling-user': 'mercy', 'x-darling-password': 'mercy-pass' },
+    });
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get('content-type'), 'image/png');
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/attachments/${delivered.payload.attachment.id}`)).status, 401);
+  } finally {
+    await app.close();
+    rmSync(attachmentsDir, { recursive: true, force: true });
+  }
 });
 
 test('real WebSocket call signaling: auth, crossed invite, accept, replacement and stale call', async () => {

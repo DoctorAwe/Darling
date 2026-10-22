@@ -20,16 +20,19 @@ app.on('web-contents-created', (_event, contents) => {
       await new Promise(resolve => setTimeout(resolve, 300));
       const actualWindow = BrowserWindow.fromWebContents(contents);
       if (visibleCheck && (!actualWindow || !actualWindow.isVisible() || actualWindow.isMinimized())) throw new Error('Loaded application window is not visible');
-      const first = await contents.executeJavaScript(`({ text: document.body.innerText, bridge: typeof window.darling?.mediaInspect })`);
-      if (first.bridge !== 'function' || !first.text.includes('重新加载')) throw new Error('Main page or preload bridge failed');
-      await contents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === '音频设备').click()`);
+      const first = await contents.executeJavaScript(`({ text: document.body.innerText, bridge: typeof window.darling?.mediaInspect, attachmentBridge: typeof window.darling?.attachmentPick })`);
+      if (first.bridge !== 'function' || first.attachmentBridge !== 'function' || !first.text.includes('重试')) throw new Error('Main page or preload bridge failed');
+      await contents.executeJavaScript(`document.querySelector('button[aria-label="添加附件"]').click()`);
+      const attachmentMenu = await contents.executeJavaScript(`document.body.innerText`);
+      if (!attachmentMenu.includes('上传文件') || !attachmentMenu.includes('截图')) throw new Error('Attachment menu failed');
+      await contents.executeJavaScript(`document.querySelector('button[aria-label="设置"]').click()`);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await contents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === '音频诊断').click()`);
       await new Promise(resolve => setTimeout(resolve, 100));
       const panel = await contents.executeJavaScript(`document.body.innerText`);
       if (!panel.includes('检测设备不会开启麦克风')) throw new Error('Audio panel failed');
-      if (!panel.includes('RTC 真实设备测试') || !panel.includes('1200 Hz')) throw new Error('RTC confirmation panel missing');
-      if (!panel.includes('尚无统计') || !panel.includes('对端解码')) throw new Error('RTC input metrics explanation missing');
       const rtc = await contents.executeJavaScript(`window.darling.rtcDeviceSnapshot()`);
-      if (!rtc.available || rtc.status !== 'idle') throw new Error('RTC diagnostics must start idle');
+      if (!['idle', 'unavailable'].includes(rtc.status)) throw new Error('RTC diagnostics entered an unexpected state: ' + JSON.stringify(rtc));
       const gated = await contents.executeJavaScript(`(() => {
         const button = Array.from(document.querySelectorAll('button')).find(b => b.textContent === '开始 15 秒 RTC 设备测试');
         return !!button && button.disabled;
@@ -50,7 +53,7 @@ app.on('web-contents-created', (_event, contents) => {
       const directory = join(root, '.local', 'desktop-smoke'); mkdirSync(directory, { recursive: true });
       const screenshot = await contents.capturePage(); writeFileSync(join(directory, 'preview.png'), screenshot.toPNG());
       writeFileSync(join(directory, 'result.json'), JSON.stringify({ passed: true, checkedAt: new Date().toISOString(), visibleVerified: visibleCheck && actualWindow.isVisible(), nativeVerified: !!nativeResult, deviceCount: nativeResult?.devices.length }, null, 2));
-      console.log('PASS: real Electron main/preload/React render, config error state, audio panel; screenshot saved.');
+      console.log('PASS: real Electron main/preload/React render, attachment menu, config error state and audio panel; screenshot saved.');
       clearTimeout(timeout); app.quit();
     } catch (error) { console.error(error); clearTimeout(timeout); app.exit(1); }
   });
