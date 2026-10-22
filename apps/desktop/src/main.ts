@@ -9,6 +9,7 @@ import { RtcNegotiation } from './rtc-negotiation';
 import { RtcDeviceTest } from './rtc-device-test';
 import { DeviceAudio } from './rtc-process';
 import { existsSync } from 'node:fs';
+import { resolveAec3Enabled } from './aec-mode';
 
 if (process.env.DARLING_USER_DATA) app.setPath('userData', resolve(process.env.DARLING_USER_DATA));
 let session: Session;
@@ -21,6 +22,13 @@ let mediaStarting = false;
 let voiceDevices: DeviceAudio | undefined;
 let callPreparation = 0;
 const voiceBeta = process.env.DARLING_VOICE_BETA === '1' || existsSync(join(__dirname, 'voice-beta.flag'));
+const aec3PackageMarker = existsSync(join(__dirname, 'aec3-experiment.flag'));
+const requestedAec = process.env.DARLING_AEC_EXPERIMENT;
+// AEC3 is the mainline voice path. PBFDAF remains an explicit developer fallback.
+const aec3Enabled = resolveAec3Enabled(voiceBeta, requestedAec);
+const packagedRtc = aec3PackageMarker ? 'darling_rtc_aec3_experimental.exe' : 'darling_rtc_process.exe';
+const rtcExecutable = resolve(process.env.DARLING_RTC_DEVICE_EXE ?? join(__dirname, 'native', packagedRtc));
+const voiceDescription = `系统默认设备 · ${aec3Enabled ? 'WebRTC AEC3' : 'PBFDAF 回退模式'} · RNNoise 降噪`;
 void app.whenReady().then(() => {
   const configPath = resolve(process.env.DARLING_CONFIG ?? (voiceBeta ? join(app.getAppPath(), 'config.json') : join(app.getPath('userData'), 'config.json')));
   session = new Session(configPath, app.getPath('userData'));
@@ -30,10 +38,10 @@ void app.whenReady().then(() => {
   media = new MediaHost(resolve(process.env.DARLING_MEDIA_ENGINE ?? join(__dirname, 'native/darling-media.exe')));
   if (voiceBeta) {
     session.configureVoice(true, true);
-    session.voiceStatus('系统默认设备 · 耳机禁用 AEC，其他输出启用 AEC · 降噪开启');
-    rtcNegotiation = new RtcNegotiation(session, resolve(process.env.DARLING_RTC_DEVICE_EXE ?? join(__dirname, 'native/darling_rtc_process.exe')), 'relay', () => voiceDevices);
+    session.voiceStatus(voiceDescription);
+    rtcNegotiation = new RtcNegotiation(session, rtcExecutable, 'relay', () => voiceDevices, undefined, aec3Enabled);
   }
-  rtcDeviceTest = new RtcDeviceTest(process.env.DARLING_RTC_DEVICE_EXE ? resolve(process.env.DARLING_RTC_DEVICE_EXE) : undefined);
+  rtcDeviceTest = new RtcDeviceTest(voiceBeta ? rtcExecutable : undefined, undefined, aec3Enabled);
   const preferences=new AudioPreferences(join(app.getPath('userData'),'audio-preferences.json'));
   const validatePair=(value:unknown)=>{
     const pair=AudioPair.parse(value);
@@ -49,6 +57,11 @@ void app.whenReady().then(() => {
     webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, autoplayPolicy: 'no-user-gesture-required' },
   });
   ipcMain.handle('session:snapshot', () => structuredClone(session.state));
+  ipcMain.handle('voice:audio', async (_event, callId: unknown, micMuted: unknown, speakerMuted: unknown) => {
+    if (typeof callId !== 'string' || typeof micMuted !== 'boolean' || typeof speakerMuted !== 'boolean' ||
+        session.state.call?.callId !== callId || session.state.call.phase !== 'active' || !rtcNegotiation) throw new Error('当前无法调整通话');
+    await rtcNegotiation.setAudio(callId, micMuted, speakerMuted);
+  });
   ipcMain.handle('session:send', (_event, text: unknown) => typeof text === 'string' ? session.send(text) : { ok: false, error: '无效消息' });
   ipcMain.handle('session:reload', () => session.start());
   ipcMain.handle('voice:configure', (_event, value: unknown) => {
@@ -68,7 +81,7 @@ void app.whenReady().then(() => {
     try {
       await media.inspect();
       voiceDevices = DeviceAudio.parse(defaultCallAudio(media.state.devices));
-      session.voiceStatus(voiceDevices.outputProfile === 'headphones' ? '系统默认耳机 · AEC 强制关闭 · 降噪开启' : '系统默认输出 · AEC 开启 · 降噪开启');
+      session.voiceStatus(voiceDescription);
       await session.refreshIce();
       if (preparation !== callPreparation || quitting) return { ok: false, error: '通话操作已取消' };
       validatePair({ inputId: voiceDevices.inputDeviceId, outputId: voiceDevices.outputDeviceId });

@@ -14,7 +14,7 @@ test('calls resolve current system defaults with AEC and noise suppression enabl
   assert.throws(()=>defaultCallAudio([]));
   assert.throws(()=>defaultCallAudio([device('a','input',true),device('b','input',true),device('out','output',true)]));
 });
-test('headphones and headsets always bypass call AEC, without disabling noise suppression', () => {
+test('headphones and headsets retain device metadata and noise suppression (AEC policy is native)', () => {
   for (const formFactor of ['headphones', 'headset'] as const) {
     const input = device('mic','input',true);
     const output = {...device('out','output',true), formFactor};

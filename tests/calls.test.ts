@@ -3,6 +3,20 @@ import assert from 'node:assert/strict';
 import { Calls } from '../apps/server/src/calls';
 import { CallState, RtcSignal } from '../packages/protocol/src/index';
 
+test('active call survives beyond 30 minutes without an expiration timer', t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const calls = new Calls(() => {});
+  const call = calls.invite('dva', true);
+  calls.accept('mercy', call.callId);
+  calls.signal('dva', { callId: call.callId, generation: 1, kind: 'offer', sdp: 'v=0' });
+  calls.signal('mercy', { callId: call.callId, generation: 1, kind: 'answer', sdp: 'v=0' });
+  calls.ready('dva', call.callId); calls.ready('mercy', call.callId);
+  t.mock.timers.tick(4 * 60 * 60 * 1000);
+  assert.equal(calls.snapshot()?.phase, 'active');
+  assert.equal(calls.snapshot()?.deadline, 0);
+  calls.end('dva', call.callId);
+});
+
 test('active requires both media-ready reports and survives the negotiation deadline', async () => {
   const calls = new Calls(() => {}, 30);
   try {
@@ -13,6 +27,7 @@ test('active requires both media-ready reports and survives the negotiation dead
     assert.equal(calls.ready('dva', call.callId).phase, 'connecting');
     assert.equal(calls.ready('dva', call.callId).phase, 'connecting');
     assert.equal(calls.ready('mercy', call.callId).phase, 'active');
+    assert.equal(calls.snapshot()?.deadline, 0, 'active calls have no duration deadline');
     await new Promise(r => setTimeout(r, 60)); assert.equal(calls.snapshot()?.phase, 'active');
     assert.equal(calls.accept('mercy', call.callId).phase, 'active');
     assert.throws(() => calls.ready('mercy', 'stale'), /STALE_CALL/);

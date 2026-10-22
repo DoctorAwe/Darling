@@ -14,6 +14,8 @@ test('call panel distinguishes ringing, connecting and ended without claiming co
   state.call!.phase = 'active';
   state.remoteAudio = { level: .1, sampledAt: Date.now() };
   assert.match(render(), /通话时长/); assert.match(render(), /对方声音/);
+  assert.match(render(), /静音麦克风/); assert.match(render(), /静音对方声音/); assert.match(render(), /挂断/);
+  assert.doesNotMatch(render(), /TURN|测试版|30 分钟|VOICE CONNECTED/);
   state.remoteAudio = { level: 0, sampledAt: Date.now() };
   assert.match(render(), /对方安静/);
   state.remoteAudio = { level: .1, sampledAt: Date.now() - 3000 };

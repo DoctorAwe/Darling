@@ -36,12 +36,12 @@ export function RtcDevicePanel({ pair, names, blocked, onActive, voiceBeta = fal
   return <div className="capture-controls">
     <h3>RTC 真实设备测试 · 最多 15 秒</h3>
     <p className="audio-note">{names || '请先检测并选择输入、输出设备。'}<br/>将开启麦克风，并在所选输出播放连续 1200 Hz 测试音。请先调低系统音量。麦克风经本机 Opus 链路送至内存接收端，不回放自己、不保存文件、不上传服务器。此测试不是音质或回声消除验收。</p>
-    <label>输出使用方式<select value={profile} disabled={active} onChange={e => setProfile(e.target.value as typeof profile)}><option value="headphones">耳机 · AEC 关闭</option><option value="speakers">扬声器 · AEC 开启</option></select></label>
+    <label>输出使用方式<select value={profile} disabled={active} onChange={e => setProfile(e.target.value as typeof profile)}><option value="headphones">耳机 · AEC3 开启</option><option value="speakers">扬声器 · AEC3 开启</option></select></label>
     <label><input type="checkbox" checked={ns} disabled={active} onChange={e => setNs(e.target.checked)}/>启用 RNNoise 降噪（效果未验收）</label>
     <label><input type="checkbox" checked={confirmed} disabled={active || blocked || !pair} onChange={e => setConfirmed(e.target.checked)}/>我已确认以上设备，允许本次录音和测试音播放</label>
     <button disabled={!state.available || !confirmed || !pair || blocked || active} onClick={() => void start()}>开始 15 秒 RTC 设备测试</button>
     <button onClick={() => { setConfirmed(false); void window.darling.rtcDeviceStop().catch(() => setError('停止请求失败，请关闭应用')); }}>立即停止 RTC 测试</button>
-    {voiceBeta && <p className="audio-note">实际通话自动使用 Windows 系统默认输入和输出。系统识别为耳机/耳麦的输出强制关闭 AEC，其他类型开启 AEC，降噪保持开启。无需在此配置；上方选项仅用于独立设备测试，识别出的耳机同样不能强制开启 AEC。</p>}
+    {voiceBeta && <p className="audio-note">实际通话自动使用 Windows 系统默认输入和输出，耳机与扬声器均启用 WebRTC AEC3 回声消除和 RNNoise 降噪。无需在此配置；上方选项仅标记独立设备测试的输出类型，不关闭 AEC。</p>}
     <p role="status">{state.detail}</p>{error && <p role="alert">{error}</p>}
     <div className="audio-note" aria-label="RTC 麦克风输入链路统计">
       <strong>{state.status === 'idle' ? '上次测试最后一次采样' : '麦克风输入链路 · 每秒更新'}</strong>

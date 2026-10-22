@@ -8,7 +8,7 @@ export class RtcNegotiation {
   private timer?: ReturnType<typeof setTimeout>;
   private attempted?: string;
   private levelTimer?: ReturnType<typeof setTimeout>;
-  constructor(private session: Session, private executable: string, private iceMode: 'disabled' | 'direct' | 'relay' = 'disabled', private devices?: () => DeviceAudio | undefined, private createHost = (...args: ConstructorParameters<typeof RtcProcessHost>) => new RtcProcessHost(...args)) {
+  constructor(private session: Session, private executable: string, private iceMode: 'disabled' | 'direct' | 'relay' = 'disabled', private devices?: () => DeviceAudio | undefined, private createHost = (...args: ConstructorParameters<typeof RtcProcessHost>) => new RtcProcessHost(...args), private aec3Experimental = false) {
     session.on('state', this.state);
     session.on('rtc.signal', this.signal);
     session.on('rtc.closed', this.closed);
@@ -16,16 +16,16 @@ export class RtcNegotiation {
   }
   private state = (state: Snapshot) => {
     const call = state.call;
-    if (state.status !== 'online' || !state.user || !call || !['connecting', 'active'].includes(call.phase) || call.deadline <= Date.now()) { this.stop(); return; }
+    if (state.status !== 'online' || !state.user || !call || !['connecting', 'active'].includes(call.phase) || (call.phase !== 'active' && call.deadline <= Date.now())) { this.stop(); return; }
     if (this.host?.scope.callId === call.callId) {
       clearTimeout(this.timer); const host = this.host;
-      this.timer = setTimeout(() => this.failed(host), Math.max(1, call.deadline - Date.now())); return;
+      this.timer = call.phase === 'active' ? undefined : setTimeout(() => this.failed(host), Math.max(1, call.deadline - Date.now())); return;
     }
     if (this.attempted === call.callId) return;
     this.stop(); this.attempted = call.callId;
     const audio = this.devices?.();
     if (this.devices && !audio) { this.session.callAction('end', call.callId); return; }
-    const host = this.host = this.createHost(this.executable, { callId: call.callId, generation: 1 }, state.user === call.caller ? 'caller' : 'callee', audio ? ['--wasapi-audio'] : [], 15000, this.iceMode, this.iceMode === 'relay' ? this.session.getIceConfig() : undefined, audio, audio ? 0 : 60000);
+    const host = this.host = this.createHost(this.executable, { callId: call.callId, generation: 1 }, state.user === call.caller ? 'caller' : 'callee', audio ? ['--wasapi-audio', ...(this.aec3Experimental ? ['--aec3-experimental'] : [])] : [], 15000, this.iceMode, this.iceMode === 'relay' ? this.session.getIceConfig() : undefined, audio, audio ? 0 : 60000);
     let outgoing = Promise.resolve();
     let readySent = false;
     const sample = async () => {
@@ -52,7 +52,7 @@ export class RtcNegotiation {
       outgoing = outgoing.then(async () => { if (this.host === host) await this.session.sendRtcSignal(signal); }).catch(() => this.failed(host));
     });
     host.on('fault', () => this.failed(host));
-    this.timer = setTimeout(() => this.failed(host), Math.max(1, call.deadline - Date.now()));
+    if (call.phase !== 'active') this.timer = setTimeout(() => this.failed(host), Math.max(1, call.deadline - Date.now()));
     void this.cleanup.then(() => { if (this.host === host) return host.start(); }).catch(() => this.failed(host));
   };
   private signal = (signal: RtcSignal) => {
@@ -67,6 +67,12 @@ export class RtcNegotiation {
     if (this.devices) this.session.voiceStatus('音频连接失败或设备异常，已停止；请检查设备和网络');
   }
   private cleanup: Promise<unknown> = Promise.resolve();
+  async setAudio(callId: string, micMuted: boolean, speakerMuted: boolean) {
+    const host = this.host;
+    if (!host || host.scope.callId !== callId || this.session.state.call?.phase !== 'active') throw new Error('通话已结束');
+    await host.setAudio(micMuted, speakerMuted);
+    if (this.host !== host) throw new Error('通话已结束');
+  }
   stop() {
     clearTimeout(this.levelTimer); this.levelTimer = undefined;
     clearTimeout(this.timer); this.timer = undefined;

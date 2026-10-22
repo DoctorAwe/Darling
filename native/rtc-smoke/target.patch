@@ -2,7 +2,7 @@ diff --git a/BUILD.gn b/BUILD.gn
 index 5bbc5b7..4ba00f9 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -525,6 +525,11 @@ if (!build_with_chromium) {
+@@ -525,6 +525,12 @@ if (!build_with_chromium) {
      visibility = [
        "//:default",
        "//:webrtc_lib_link_test",
@@ -11,18 +11,24 @@ index 5bbc5b7..4ba00f9 100644
 +      "//:darling_sdp_smoke",
 +      "//:darling_rtc_process",
 +      "//:darling_rnnoise_evaluate",
++      "//:darling_aec_chain_test",
      ]
  
      sources = []
-@@ -592,6 +597,40 @@ if (!build_with_chromium) {
+@@ -592,6 +598,58 @@ if (!build_with_chromium) {
      }
    }
  
 +  rtc_executable("darling_rtc_process") {
 +    check_includes = false
-+    sources = [ "../../../native/rtc-smoke/rtc_process.cc" ]
++    sources = [
++      "../../../native/rtc-smoke/rtc_process.cc",
++      "../../../native/media-engine/src/aec/linear_aec.cpp",
++      "../../../native/media-engine/src/aec/delay_estimator.cpp",
++      "../../../native/media-engine/src/aec/residual_suppressor.cpp",
++    ]
 +    include_dirs = [ "../../../native/media-engine/build/_deps/json-src/include" ]
-+    defines = [ "JSON_NOEXCEPTION" ]
++    defines = [ "JSON_NOEXCEPTION", "DARLING_AEC_NO_EXCEPTIONS" ]
 +    libs = [ "../../rnnoise-build/Release/darling_rnnoise.lib" ]
 +    deps = [ ":webrtc", "//modules/audio_device:audio_device_module_from_input_and_output" ]
 +  }
@@ -30,6 +36,19 @@ index 5bbc5b7..4ba00f9 100644
 +  rtc_executable("darling_rnnoise_evaluate") {
 +    check_includes = false
 +    sources = [ "../../../native/rtc-smoke/rnnoise_evaluate.cc" ]
++    libs = [ "../../rnnoise-build/Release/darling_rnnoise.lib" ]
++    deps = [ ":webrtc" ]
++  }
++
++  rtc_executable("darling_aec_chain_test") {
++    check_includes = false
++    sources = [
++      "../../../native/rtc-smoke/aec_chain_test.cc",
++      "../../../native/media-engine/src/aec/linear_aec.cpp",
++      "../../../native/media-engine/src/aec/delay_estimator.cpp",
++      "../../../native/media-engine/src/aec/residual_suppressor.cpp",
++    ]
++    defines = [ "DARLING_AEC_NO_EXCEPTIONS" ]
 +    libs = [ "../../rnnoise-build/Release/darling_rnnoise.lib" ]
 +    deps = [ ":webrtc" ]
 +  }

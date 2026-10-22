@@ -3,10 +3,10 @@
 ## 实现
 
 - 固定上游 Xiph RNNoise v0.2，提交和模型 SHA256 见 `native/rnnoise.lock.json`。使用官方常规模型，不使用未注明来源的第三方权重。
-- WebRTC `BuiltinAudioProcessingBuilder.SetCapturePostProcessing` 在 AEC、多频带重组之后处理采集数据，WebRTC NS 同时关闭；不叠加双重降噪，不新增 AGC 或硬噪声门。
+- WebRTC `BuiltinAudioProcessingBuilder.SetCapturePostProcessing` 中现为 PBFDAF → 残余回声抑制 → RNNoise。WebRTC 自带 AEC/NS 关闭；不叠加双重降噪，不新增 AGC 或硬噪声门。AEC 迁移见 `pbfdaf-integration.md`。
 - RNNoise 使用 48 kHz、480 样本的单声道 10 ms 块。WebRTC AudioBuffer 与 RNNoise 均使用 float S16 幅度范围，无错误的 32768 倍二次缩放。
 - 16/32 kHz 处理格式使用 WebRTC sinc 重采样适配；48 kHz 不额外重采样。状态在初始化/格式改变时重建，每次通话独立。非单声道格式拒绝处理。
-- Windows 识别为耳机/耳麦仍强制禁用 AEC；降噪开启时用 RNNoise，显式关闭降噪时不创建 RNNoise 处理器。
+- 按 2026-10-20 最新用户要求，耳机与扬声器均启用自研 AEC；降噪开启时用 RNNoise，显式关闭降噪时不创建 RNNoise 处理器。
 - RNNoise 编译成独立 DLL，避免与 WebRTC 内置 Opus 的 C 符号冲突。x64 SSE2，无 AVX2 硬要求；静态 CRT，仅依赖 KERNEL32。
 - 统计提供 RNNoise 算法名、帧数、累计/最大处理耗时，不包含 PCM。模型在本机运行，无网络推理。
 

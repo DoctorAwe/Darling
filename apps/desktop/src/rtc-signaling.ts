@@ -8,7 +8,7 @@ export class RtcSignaling extends EventEmitter {
   private pending = new Map<string, { callId: string; resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   constructor(private transmit: (packet: ClientPacket) => void, private timeoutMs = 10000) { super(); }
   bind(call: CallState | null | undefined, user: User | undefined, online: boolean) {
-    const valid = online && user && (call?.phase === 'connecting' || call?.phase === 'active') && call.deadline > Date.now() &&
+    const valid = online && user && (call?.phase === 'active' || (call?.phase === 'connecting' && call.deadline > Date.now())) &&
       (user === call.caller || user === call.callee);
     if (!valid) { this.clear(); return; }
     if (this.scope?.call.callId !== call.callId || this.scope.user !== user) this.clear();
@@ -25,7 +25,7 @@ export class RtcSignaling extends EventEmitter {
   }
   private accepts(signal: RtcSignal, sender: User) {
     const scope = this.scope;
-    if (!scope || scope.call.deadline <= Date.now() || scope.call.callId !== signal.callId) return false;
+    if (!scope || (scope.call.phase !== 'active' && scope.call.deadline <= Date.now()) || scope.call.callId !== signal.callId) return false;
     if (sender !== scope.call.caller && sender !== scope.call.callee) return false;
     return signal.kind === 'ice' || (signal.kind === 'offer' ? sender === scope.call.caller : sender === scope.call.callee);
   }

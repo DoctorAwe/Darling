@@ -34,9 +34,9 @@ export class Calls {
     if (!['connecting', 'active'].includes(call.phase) || !this.offer || !this.answer) throw new Error('CALL_NOT_NEGOTIATED');
     this.readyUsers.add(user);
     if (call.phase === 'connecting' && this.readyUsers.size === 2) {
-      call.phase = 'active'; call.deadline = Date.now() + 30 * 60 * 1000;
+      call.phase = 'active'; call.deadline = 0; // Active calls have no application time limit.
       clearTimeout(this.timer);
-      this.timer = setTimeout(() => this.finish('timeout'), 30 * 60 * 1000); this.timer.unref();
+      this.timer = undefined;
       this.publish(this.snapshot()!);
     }
     return this.snapshot()!;

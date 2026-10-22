@@ -23,6 +23,8 @@
 #include "api/audio_options.h"
 #include "synthetic_audio.h"
 #include "rnnoise_processing.h"
+#include "capture_chain.h"
+#include "aec3_pipeline.h"
 #include "modules/audio_device/include/audio_device_factory.h"
 #include "rtc_base/win/scoped_com_initializer.h"
 
@@ -64,7 +66,7 @@ class Stats : public webrtc::RTCStatsCollectorCallback {
     auto all = Json::parse(report->ToJson(), nullptr, false);
     Json filtered = Json::array();
     if (all.is_array()) for (const auto& item : all) {
-      if (filtered.size() >= 29) break;
+      if (filtered.size() >= 28) break;
       const auto type = item.value("type", "");
       if (type != "candidate-pair" && type != "transport" && type != "inbound-rtp" && type != "outbound-rtp") continue;
       Json entry = Json::object();
@@ -95,24 +97,32 @@ class Engine {
   Observer peer_observer;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory;
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+  webrtc::scoped_refptr<webrtc::AudioTrackInterface> local_audio;
   std::string call_id, role;
   bool negotiated = false, answer_applied = false;
   int remote_candidates = 0;
   bool synthetic_enabled = false;
   bool wasapi_enabled = false;
   bool synthetic_denoise = false;
+  bool aec_enabled = false;
+  bool aec3_enabled = false;
+  webrtc::scoped_refptr<webrtc::AudioProcessing> experimental_apm;
+  std::shared_ptr<darling::Aec3PipelineMetrics> aec3_metrics;
   std::unique_ptr<webrtc::ScopedCOMInitializer> com;
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> device_adm;
   webrtc::scoped_refptr<SyntheticAudio> synthetic;
   std::shared_ptr<RnnoiseMetrics> denoise_metrics;
+  std::shared_ptr<darling::AecMetrics> aec_metrics;
   bool Start() { return network->Start() && worker->Start() && signaling->Start(); }
   void Close() {
-    signaling->BlockingCall([&] { if (pc) pc->Close(); pc = nullptr; factory = nullptr;
+    signaling->BlockingCall([&] { if (pc) pc->Close(); pc = nullptr; local_audio = nullptr; factory = nullptr;
       peer_observer.candidates = Json::array(); peer_observer.candidate_count = 0; peer_observer.overflow = false; });
     if (synthetic) synthetic->Terminate();
     synthetic = nullptr;
     denoise_metrics.reset();
-    worker->BlockingCall([&] { device_adm = nullptr; com.reset(); });
+    aec_metrics.reset();
+    worker->BlockingCall([&] { experimental_apm = nullptr; device_adm = nullptr; com.reset(); });
+    aec3_metrics.reset();
     call_id.clear(); role.clear(); negotiated = false; answer_applied = false;
     remote_candidates = 0;
   }
@@ -141,7 +151,29 @@ class Engine {
       deps.audio_encoder_factory = webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>();
       deps.audio_decoder_factory = webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>();
       auto apm_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
-      if ((wasapi_enabled && audio.value("noiseSuppression", false)) || synthetic_denoise) {
+      const bool rnnoise_requested = (wasapi_enabled && audio.value("noiseSuppression", false)) || synthetic_denoise;
+      if (aec3_enabled) {
+        apm_builder = std::make_unique<darling::Aec3PipelineBuilder>(experimental_apm);
+        webrtc::AudioProcessing::Config processing;
+        processing.echo_canceller.enabled = true;
+        processing.echo_canceller.mobile_mode = false;
+        processing.echo_canceller.enforce_high_pass_filtering = false;
+        processing.noise_suppression.enabled = false;
+        processing.gain_controller1.enabled = false;
+        processing.gain_controller2.enabled = false;
+        processing.high_pass_filter.enabled = false;
+        apm_builder->SetConfig(processing);
+        aec3_metrics = std::make_shared<darling::Aec3PipelineMetrics>();
+        if (rnnoise_requested) denoise_metrics = std::make_shared<RnnoiseMetrics>();
+        apm_builder->SetCapturePostProcessing(std::make_unique<darling::Aec3PostProcessing>(aec3_metrics, denoise_metrics));
+      } else if (aec_enabled) {
+        aec_metrics = std::make_shared<darling::AecMetrics>();
+        if (rnnoise_requested) denoise_metrics = std::make_shared<RnnoiseMetrics>();
+        auto reference = std::make_shared<darling::RenderReferenceQueue>();
+        apm_builder->SetRenderPreProcessing(std::make_unique<darling::RenderReferenceTap>(reference));
+        apm_builder->SetCapturePostProcessing(std::make_unique<darling::CaptureChain>(
+            reference, rnnoise_requested, aec_metrics, denoise_metrics));
+      } else if (rnnoise_requested) {
         denoise_metrics = std::make_shared<RnnoiseMetrics>();
         apm_builder->SetCapturePostProcessing(std::make_unique<RnnoiseProcessing>(denoise_metrics));
       }
@@ -149,6 +181,21 @@ class Engine {
       webrtc::EnableMedia(deps);
       factory = webrtc::CreateModularPeerConnectionFactory(std::move(deps));
       if (!factory) return;
+      if (aec3_enabled) worker->BlockingCall([&] {
+        // VoiceEngine::Init applies its own NS/AGC/HPF defaults AFTER Build.
+        // Restore the experiment policy before any PeerConnection can record.
+        // Track options below preserve this policy during SDP negotiation.
+        if (!experimental_apm) return;
+        auto actual = experimental_apm->GetConfig();
+        actual.echo_canceller.enabled = true;
+        actual.echo_canceller.mobile_mode = false;
+        actual.echo_canceller.enforce_high_pass_filtering = false;
+        actual.noise_suppression.enabled = false;
+        actual.gain_controller1.enabled = false;
+        actual.gain_controller2.enabled = false;
+        actual.high_pass_filter.enabled = false;
+        experimental_apm->ApplyConfig(actual);
+      });
       if (wasapi_enabled) {
         bool selected = false;
         worker->BlockingCall([&] {
@@ -186,16 +233,37 @@ class Engine {
       pc = result.MoveValue(); pc->SetAudioRecording(synthetic_enabled || wasapi_enabled); pc->SetAudioPlayout(synthetic_enabled || wasapi_enabled);
       if (synthetic_enabled || wasapi_enabled) {
         webrtc::AudioOptions options;
-        options.echo_cancellation = false; options.noise_suppression = false; options.auto_gain_control = false;
+        options.echo_cancellation = aec3_enabled; options.noise_suppression = false; options.auto_gain_control = false;
         options.highpass_filter = false;
         if (wasapi_enabled) {
-          options.echo_cancellation = audio["outputProfile"] == "speakers";
-          // RNNoise runs once in capture post-processing, after AEC.
+          // Exactly one AEC, including on headphones. NS remains external.
+          options.echo_cancellation = aec3_enabled;
           options.noise_suppression = false;
         }
         auto source = factory->CreateAudioSource(options);
         auto track = factory->CreateAudioTrack(wasapi_enabled ? "wasapi" : "synthetic", source.get());
+        local_audio = track;
         if (!pc->AddTrack(track, {"audio"}).ok()) { pc->Close(); pc = nullptr; }
+        if (pc && aec3_enabled) {
+          const bool valid = worker->BlockingCall([&] {
+            if (!experimental_apm) return false;
+            // AddTrack creates the send channel with engine defaults before
+            // source options take effect during SDP negotiation. No media is
+            // flowing yet; restore the policy here as well.
+            auto desired = experimental_apm->GetConfig();
+            desired.noise_suppression.enabled = false;
+            desired.gain_controller1.enabled = false;
+            desired.gain_controller2.enabled = false;
+            desired.high_pass_filter.enabled = false;
+            experimental_apm->ApplyConfig(desired);
+            const auto actual = experimental_apm->GetConfig();
+            return actual.echo_canceller.enabled && !actual.echo_canceller.mobile_mode &&
+                !actual.noise_suppression.enabled && !actual.gain_controller1.enabled &&
+                !actual.gain_controller2.enabled && !actual.high_pass_filter.enabled &&
+                !actual.echo_canceller.enforce_high_pass_filtering;
+          });
+          if (!valid) { pc->Close(); pc = nullptr; }
+        }
       } else if (requested_role == "caller" && !pc->AddTransceiver(webrtc::MediaType::AUDIO).ok()) {
         pc->Close(); pc = nullptr;
       }
@@ -249,16 +317,29 @@ bool ServersValid(const Json& servers) {
   return true;
 }
 int main(int argc, char** argv) {
-  if (argc > 3 || (argc >= 2 && std::string(argv[1]) != "--synthetic-audio" && std::string(argv[1]) != "--wasapi-audio") ||
-      (argc == 3 && (std::string(argv[1]) != "--synthetic-audio" || std::string(argv[2]) != "--rnnoise"))) return 6;
+  bool synthetic = false, wasapi = false, denoise = false, aec = false, no_aec = false, aec3 = false;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--synthetic-audio" && !synthetic) synthetic = true;
+    else if (arg == "--wasapi-audio" && !wasapi) wasapi = true;
+    else if (arg == "--rnnoise" && !denoise) denoise = true;
+    else if (arg == "--aec" && !aec) aec = true;
+    else if (arg == "--aec3-experimental" && !aec3) aec3 = true;
+    else if (arg == "--no-aec" && !no_aec) no_aec = true;
+    else return 6;
+  }
+  if ((synthetic && wasapi) || (aec && no_aec) || (aec3 && (aec || no_aec)) || (denoise && !synthetic) ||
+      ((aec || no_aec || aec3) && !synthetic && !wasapi)) return 6;
   webrtc::WinsockInitializer winsock;
   if (winsock.error() != 0) return 5;
   if (!webrtc::InitializeSSL()) return 1;
   {
     Engine engine;
-    engine.synthetic_enabled = argc >= 2 && std::string(argv[1]) == "--synthetic-audio";
-    engine.synthetic_denoise = argc == 3;
-    engine.wasapi_enabled = argc == 2 && std::string(argv[1]) == "--wasapi-audio";
+    engine.synthetic_enabled = synthetic;
+    engine.synthetic_denoise = denoise;
+    engine.wasapi_enabled = wasapi;
+    engine.aec_enabled = !no_aec && (wasapi || aec || aec3);
+    engine.aec3_enabled = aec3;
     if (!engine.Start()) std::quick_exit(2);
     bool ready = false;
     std::string line;
@@ -275,7 +356,9 @@ int main(int argc, char** argv) {
       bool shutdown = false;
       if (type == "engine.hello") {
         ready = true; response_type = "engine.ready";
-        response = {{"engineVersion", "0.3.0-rtc-diagnostic"}, {"negotiationOnly", !engine.synthetic_enabled && !engine.wasapi_enabled},
+        response = {{"engineVersion", "0.4.2-aec3-experimental"}, {"aec", engine.aec_enabled},
+          {"aecAlgorithm", !engine.aec_enabled ? "none" : engine.aec3_enabled ? "webrtc-aec3" : "darling-pbfdaf-v2"},
+          {"negotiationOnly", !engine.synthetic_enabled && !engine.wasapi_enabled},
           {"syntheticAudio", engine.synthetic_enabled}, {"wasapiAudio", engine.wasapi_enabled}, {"rtc", false}, {"capture", false}, {"playback", false}};
       } else if (!ready) error = "HANDSHAKE_REQUIRED";
       else if (type == "engine.shutdown") { engine.Close(); shutdown = true; }
@@ -302,6 +385,20 @@ int main(int argc, char** argv) {
           else if (!engine.Open(id, payload["role"], payload.value("iceMode", Json()) == "direct", payload.value("iceServers", Json::array()), payload.value("deviceAudio", Json::object()))) error = "OPEN_FAILED_OR_BUSY";
         } else if (engine.call_id != id) error = "STALE_CALL";
         else if (type == "rtc.close") engine.Close();
+        else if (type == "rtc.audio") {
+          if (!payload.contains("micMuted") || !payload["micMuted"].is_boolean() ||
+              !payload.contains("speakerMuted") || !payload["speakerMuted"].is_boolean()) error = "INVALID_AUDIO_CONTROL";
+          else engine.signaling->BlockingCall([&] {
+            if (!engine.local_audio) { error = "AUDIO_UNAVAILABLE"; return; }
+            // Track mute sends silence while keeping AEC/reference processing alive.
+            engine.local_audio->set_enabled(!payload["micMuted"].get<bool>());
+            for (const auto& receiver : engine.pc->GetReceivers()) {
+              auto track = receiver->track();
+              if (track && track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind)
+                track->set_enabled(!payload["speakerMuted"].get<bool>());
+            }
+          });
+        }
         else if (type == "rtc.stats") {
           auto callback = webrtc::make_ref_counted<Stats>(); auto future = callback->result.get_future();
           engine.signaling->BlockingCall([&] { engine.pc->GetStats(callback.get()); });
@@ -317,6 +414,31 @@ int main(int argc, char** argv) {
               {"frames", engine.denoise_metrics->frames.load()},
               {"totalUs", engine.denoise_metrics->total_us.load()},
               {"maximumUs", engine.denoise_metrics->maximum_us.load()}});
+            if (engine.aec_metrics) response["stats"].push_back({
+              {"type", "aec"}, {"algorithm", "darling-pbfdaf-v2"},
+              {"frames", engine.aec_metrics->frames.load()},
+              {"delaySamples", engine.aec_metrics->delay_samples.load()},
+              {"erleDb", engine.aec_metrics->erle_db.load()},
+              {"gamma", engine.aec_metrics->gamma.load()},
+              {"gain", engine.aec_metrics->gain.load()},
+              {"missingReference", engine.aec_metrics->missing_reference.load()},
+              {"resets", engine.aec_metrics->resets.load()},
+              {"safetyEvents", engine.aec_metrics->safety_events.load()},
+              {"outputProtection", engine.aec_metrics->output_protection.load()},
+              {"totalUs", engine.aec_metrics->total_us.load()},
+              {"maximumUs", engine.aec_metrics->maximum_us.load()}});
+            if (engine.aec3_metrics) {
+              engine.worker->BlockingCall([&] {
+                const auto actual = engine.experimental_apm->GetConfig();
+                response["stats"].push_back({{"type", "aec"}, {"algorithm", "webrtc-aec3"},
+                  {"experimental", true}, {"enabled", actual.echo_canceller.enabled},
+                  {"webrtcNs", actual.noise_suppression.enabled},
+                  {"agc1", actual.gain_controller1.enabled}, {"agc2", actual.gain_controller2.enabled},
+                  {"highpass", actual.high_pass_filter.enabled},
+                  {"postFrames", engine.aec3_metrics->post_frames.load()},
+                  {"outputProtection", engine.aec3_metrics->output_protection.load()}});
+              });
+            }
             engine.signaling->BlockingCall([&] {
               const auto* remote = engine.pc->remote_description();
               response["stats"].push_back({{"type", "diagnostic"}, {"received", engine.remote_candidates},

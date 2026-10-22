@@ -11,7 +11,7 @@ export class RtcDeviceTest {
   private timer?: ReturnType<typeof setTimeout>;
   private stopping?: Promise<void>;
   private statsTimer?: ReturnType<typeof setTimeout>;
-  constructor(private executable?: string, private create: (...args: ConstructorParameters<typeof RtcProcessHost>) => Host = (...args) => new RtcProcessHost(...args)) {
+  constructor(private executable?: string, private create: (...args: ConstructorParameters<typeof RtcProcessHost>) => Host = (...args) => new RtcProcessHost(...args), private aec3Experimental = false) {
     this.state = { available: !!executable, status: 'idle', detail: executable ? '尚未开始' : '未配置 RTC 设备测试引擎' };
   }
   get active() { return !!this.hosts || !!this.stopping; }
@@ -19,7 +19,7 @@ export class RtcDeviceTest {
     if (!this.executable || this.active) throw new Error('设备测试不可用或尚未停止');
     const audio = DeviceAudio.parse(value);
     const scope = { callId: randomUUID(), generation: 1 as const };
-    const real = this.create(this.executable, scope, 'caller', ['--wasapi-audio'], 10000, 'direct', undefined, audio);
+    const real = this.create(this.executable, scope, 'caller', ['--wasapi-audio', ...(this.aec3Experimental ? ['--aec3-experimental'] : [])], 10000, 'direct', undefined, audio);
     const synthetic = this.create(this.executable, scope, 'callee', ['--synthetic-audio'], 10000, 'direct');
     const hosts = this.hosts = [real, synthetic];
     this.state = { available: true, status: 'starting', detail: '正在打开已确认的设备；最多 15 秒' };

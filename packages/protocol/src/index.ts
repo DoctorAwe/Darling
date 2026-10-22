@@ -75,6 +75,7 @@ export type RtcInputMetrics = {
 };
 export type RtcDeviceTestState = { available: boolean; status: 'idle' | 'starting' | 'running' | 'stopping'; detail: string; inputMetrics?: RtcInputMetrics };
 export interface DesktopApi {
+  callAudio(callId: string, micMuted: boolean, speakerMuted: boolean): Promise<void>;
   voiceConfigure(value: { confirmed: true; inputDeviceId: string; outputDeviceId: string; outputProfile: 'headphones' | 'speakers'; noiseSuppression: boolean }): Promise<void>;
   rtcDeviceSnapshot(): Promise<RtcDeviceTestState>;
   rtcDeviceStart(value: { confirmed: true; inputDeviceId: string; outputDeviceId: string; outputProfile: 'headphones' | 'speakers'; noiseSuppression: boolean }): Promise<void>;
