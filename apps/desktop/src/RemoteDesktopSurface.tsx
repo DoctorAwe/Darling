@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { RemoteSessionState, RemoteSignal, Snapshot } from '../../../packages/protocol/src/index';
+import { RemoteInputEvent, type RemoteInputEvent as InputEvent, type RemoteSessionState, type RemoteSignal, type Snapshot } from '../../../packages/protocol/src/index';
 import { Icon } from './Icon';
 
 const names = { dva: 'D.Va', mercy: 'Mercy' } as const;
@@ -11,6 +11,7 @@ type Telemetry = { route: 'checking' | 'direct' | 'relay'; quality: '检测中' 
 
 function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'controller' | 'controlled') {
   const streamRef = useRef<MediaStream | undefined>(undefined); const [stream, setStream] = useState<MediaStream | undefined>(undefined);
+  const controlRef = useRef<RTCDataChannel | undefined>(undefined); const [controlReady, setControlReady] = useState(false);
   const [detail, setDetail] = useState('正在建立媒体通道'); const [telemetry, setTelemetry] = useState<Telemetry>({ route: 'checking', quality: '检测中' });
   useEffect(() => {
     if (!remote || !['connecting', 'active'].includes(remote.phase)) return;
@@ -58,9 +59,13 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
         const video = pc.addTransceiver('video', { direction: 'recvonly' }); pc.addTransceiver('audio', { direction: 'recvonly' });
         const capabilities = RTCRtpReceiver.getCapabilities('video');
         if (capabilities) video.setCodecPreferences([...capabilities.codecs].sort((a, b) => Number(b.mimeType.toLowerCase() === 'video/h264') - Number(a.mimeType.toLowerCase() === 'video/h264')));
-        pc.createDataChannel('control', { ordered: true }); const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+        const control = pc.createDataChannel('control', { ordered: true }); controlRef.current = control;
+        control.onopen = () => setControlReady(true); control.onclose = () => setControlReady(false);
+        const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
         await send({ sessionId: remote.sessionId, generation: 1, kind: 'offer', sdp: offer.sdp! });
-      } else pc.ondatachannel = event => { if (event.channel.label === 'control') event.channel.onmessage = () => {}; };
+      } else pc.ondatachannel = event => { if (event.channel.label === 'control') event.channel.onmessage = message => {
+        try { void window.darling.remoteInput(remote.sessionId, RemoteInputEvent.parse(JSON.parse(String(message.data)))); } catch { /* malformed peer input is ignored */ }
+      }; };
       unsubscribe = window.darling.subscribeRemoteSignal(enqueue);
       for (const value of await window.darling.remoteDrainSignals(remote.sessionId)) enqueue(value);
       statsTimer = setInterval(async () => {
@@ -79,18 +84,32 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
       return pc;
     };
     let pc: RTCPeerConnection | undefined; void start().then(value => { pc = value; }).catch(() => setDetail('无法启动远程媒体'));
-    return () => { disposed = true; unsubscribe?.(); clearInterval(statsTimer); pc?.close(); streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = undefined; setStream(undefined); };
+    return () => { disposed = true; unsubscribe?.(); clearInterval(statsTimer); controlRef.current = undefined; setControlReady(false); pc?.close(); streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = undefined; setStream(undefined); };
   }, [remote?.sessionId, role]);
   useEffect(() => { for (const track of streamRef.current?.getAudioTracks() ?? []) track.enabled = !!remote?.permissions.audio; }, [remote?.permissions.audio]);
-  return { stream, detail, telemetry };
+  const sendControl = (event: InputEvent) => { if (controlRef.current?.readyState === 'open') controlRef.current.send(JSON.stringify(event)); };
+  return { stream, detail, telemetry, controlReady, sendControl };
 }
 
 export function RemoteDesktopSurface({ surface, state }: { surface: 'remote-control' | 'remote-status'; state: Snapshot }) {
   const [, tick] = useState(0); const video = useRef<HTMLVideoElement>(null); const remote = state.remote; const media = useRemoteMedia(remote, surface === 'remote-control' ? 'controller' : 'controlled');
   useEffect(() => { const id = setInterval(() => tick(value => value + 1), 1000); return () => clearInterval(id); }, []);
   useEffect(() => { if (video.current && media.stream) video.current.srcObject = media.stream; }, [media.stream]);
+  const normalizedPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    const element = video.current; if (!element?.videoWidth || !element.videoHeight) return;
+    const rect = element.getBoundingClientRect(); const scale = Math.min(rect.width / element.videoWidth, rect.height / element.videoHeight);
+    const width = element.videoWidth * scale, height = element.videoHeight * scale; const left = rect.left + (rect.width - width) / 2, top = rect.top + (rect.height - height) / 2;
+    const x = (event.clientX - left) / width, y = (event.clientY - top) / height; if (x < 0 || x > 1 || y < 0 || y > 1) return;
+    return { x, y };
+  };
+  const canControl = !!remote?.permissions.control && media.controlReady;
+  const sendPointer = (event: React.PointerEvent<HTMLDivElement>, down?: boolean) => {
+    if (!canControl) return; const point = normalizedPointer(event); if (!point) return;
+    media.sendControl({ type: 'pointer.move', ...point });
+    if (down !== undefined && [0, 1, 2].includes(event.button)) media.sendControl({ type: 'pointer.button', button: (['left', 'middle', 'right'] as const)[event.button], down });
+  };
   if (!remote || !['connecting', 'active'].includes(remote.phase)) return <div className={`remote-surface ${surface}`}><span>远程桌面会话已结束</span></div>;
   const end = () => void window.darling.remoteAction('end', remote.sessionId); const route = media.telemetry.route === 'direct' ? '直连' : media.telemetry.route === 'relay' ? '服务器中继' : '检测中';
   if (surface === 'remote-status') return <div className="remote-surface remote-status"><span className="remote-live-dot"/><strong>正在被 {names[remote.controller]} 远程连接</strong><time>{elapsed(remote.startedAt)}</time><span className="quality">网络 · {media.telemetry.quality}</span><button aria-pressed={remote.permissions.control} onClick={() => void window.darling.remotePermissions(remote.sessionId, { ...remote.permissions, control: !remote.permissions.control })}>{remote.permissions.control ? '允许操作' : '仅观看'}</button><button aria-pressed={remote.permissions.audio} onClick={() => void window.darling.remotePermissions(remote.sessionId, { ...remote.permissions, audio: !remote.permissions.audio })}>{remote.permissions.audio ? '声音已开' : '声音关闭'}</button><button className="remote-end" onClick={end}>断开</button></div>;
-  return <div className="remote-surface remote-control"><header><div><strong>{names[remote.controlled]} 的桌面</strong><span>{remote.phase === 'active' ? elapsed(remote.startedAt) : media.detail}</span></div><div><span>连接路径 · {route}</span><span>网络 · {media.telemetry.quality}{media.telemetry.rttMs === undefined ? '' : ` · ${media.telemetry.rttMs}ms`}</span><span>{remote.permissions.control ? '可操作' : '仅观看'}</span><span>{remote.permissions.audio ? '声音开启' : '声音关闭'}</span><button className="remote-end" onClick={end}>断开连接</button></div></header><div className="remote-stage">{media.stream ? <video ref={video} autoPlay playsInline/> : <><Icon name="desktop"/><h1>正在准备远程画面</h1><p>{media.detail}</p></>}</div></div>;
+  return <div className="remote-surface remote-control"><header><div><strong>{names[remote.controlled]} 的桌面</strong><span>{remote.phase === 'active' ? elapsed(remote.startedAt) : media.detail}</span></div><div><span>连接路径 · {route}</span><span>网络 · {media.telemetry.quality}{media.telemetry.rttMs === undefined ? '' : ` · ${media.telemetry.rttMs}ms`}</span><span>{canControl ? '可操作' : '仅观看'}</span><span>{remote.permissions.audio ? '声音开启' : '声音关闭'}</span><button className="remote-end" onClick={end}>断开连接</button></div></header><div className={`remote-stage ${canControl ? 'interactive' : ''}`} tabIndex={canControl ? 0 : -1} onPointerMove={event => sendPointer(event)} onPointerDown={event => { event.currentTarget.focus(); event.currentTarget.setPointerCapture(event.pointerId); sendPointer(event, true); }} onPointerUp={event => { sendPointer(event, false); event.currentTarget.releasePointerCapture(event.pointerId); }} onWheel={event => { if (canControl) { event.preventDefault(); media.sendControl({ type: 'pointer.wheel', deltaX: Math.max(-1200, Math.min(1200, Math.round(event.deltaX))), deltaY: Math.max(-1200, Math.min(1200, Math.round(event.deltaY))) }); } }} onKeyDown={event => { if (canControl && !event.repeat && RemoteInputEvent.safeParse({ type: 'key', code: event.code, down: true }).success) { event.preventDefault(); media.sendControl({ type: 'key', code: event.code, down: true }); } }} onKeyUp={event => { if (canControl && RemoteInputEvent.safeParse({ type: 'key', code: event.code, down: false }).success) { event.preventDefault(); media.sendControl({ type: 'key', code: event.code, down: false }); } }} onBlur={() => media.sendControl({ type: 'release' })} onContextMenu={event => { if (canControl) event.preventDefault(); }}>{media.stream ? <video ref={video} autoPlay playsInline/> : <><Icon name="desktop"/><h1>正在准备远程画面</h1><p>{media.detail}</p></>}</div></div>;
 }

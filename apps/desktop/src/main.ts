@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, session as electronSession, webContents } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, screen, session as electronSession, webContents } from 'electron';
 import { join, resolve } from 'node:path';
 import { release } from 'node:os';
 import { Session } from './session';
@@ -11,12 +11,15 @@ import { DeviceAudio } from './rtc-process';
 import { existsSync } from 'node:fs';
 import { resolveAec3Enabled } from './aec-mode';
 import { RemoteSignal } from '../../../packages/protocol/src/index';
+import { RemoteInputGate, RemoteInputHost } from './remote-input';
 
 if (process.env.DARLING_USER_DATA) app.setPath('userData', resolve(process.env.DARLING_USER_DATA));
 let session: Session;
 let window: BrowserWindow;
 let remoteControlWindow: BrowserWindow | undefined;
 let remoteStatusWindow: BrowserWindow | undefined;
+let remoteInput: RemoteInputHost;
+const remoteInputGate = new RemoteInputGate();
 const pendingRemoteSignals: Array<ReturnType<typeof RemoteSignal.parse>> = [];
 let media: MediaHost;
 let rtcNegotiation: RtcNegotiation | undefined;
@@ -36,6 +39,7 @@ const voiceDescription = `系统默认设备 · ${aec3Enabled ? 'WebRTC AEC3' : 
 void app.whenReady().then(() => {
   const configPath = resolve(process.env.DARLING_CONFIG ?? (voiceBeta ? join(app.getAppPath(), 'config.json') : join(app.getPath('userData'), 'config.json')));
   session = new Session(configPath, app.getPath('userData'));
+  remoteInput = new RemoteInputHost(resolve(join(__dirname, 'native/darling-remote-input.exe')));
   // Explicit diagnostic opt-in; never enables invite/accept or real audio.
   if (!voiceBeta && process.env.DARLING_RTC_NEGOTIATION_EXE)
     rtcNegotiation = new RtcNegotiation(session, resolve(process.env.DARLING_RTC_NEGOTIATION_EXE));
@@ -69,6 +73,11 @@ void app.whenReady().then(() => {
   ipcMain.handle('remote:drain-signals', (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || session.state.remote?.sessionId !== sessionId) return [];
     return pendingRemoteSignals.splice(0).filter(signal => signal.sessionId === sessionId);
+  });
+  ipcMain.handle('remote:input', async (event, sessionId: unknown, value: unknown) => {
+    const remote = session.state.remote;
+    if (typeof sessionId !== 'string' || !remote || remote.sessionId !== sessionId || remote.controlled !== session.state.user || !remote.permissions.control || !['connecting', 'active'].includes(remote.phase) || !remoteStatusWindow || remoteStatusWindow.isDestroyed() || event.sender.id !== remoteStatusWindow.webContents.id) throw new Error('当前未授权远程操作');
+    await remoteInput.send(remoteInputGate.parse(value));
   });
   ipcMain.handle('voice:audio', async (_event, callId: unknown, micMuted: unknown, speakerMuted: unknown) => {
     if (typeof callId !== 'string' || typeof micMuted !== 'boolean' || typeof speakerMuted !== 'boolean' ||
@@ -169,7 +178,8 @@ void app.whenReady().then(() => {
     const requester = request.frame ? webContents.fromFrame(request.frame) : undefined;
     if (!remote || remote.controlled !== session.state.user || !['connecting', 'active'].includes(remote.phase) || !remoteStatusWindow || remoteStatusWindow.isDestroyed() || requester?.id !== remoteStatusWindow.webContents.id) return callback({});
     const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false });
-    const primary = sources[0]; if (!primary) return callback({});
+    const primaryId = String(screen.getPrimaryDisplay().id);
+    const primary = sources.find(source => source.display_id === primaryId) ?? sources[0]; if (!primary) return callback({});
     callback({ video: primary, ...(request.audioRequested && remote.permissions.audio ? { audio: 'loopback' as const } : {}) });
   });
   const syncRemoteWindows = (state: typeof session.state) => {
@@ -180,6 +190,7 @@ void app.whenReady().then(() => {
     if (controlled && !remoteStatusWindow) remoteStatusWindow = openRemoteSurface('remote-status');
     if (!controller && remoteControlWindow) { remoteControlWindow.destroy(); remoteControlWindow = undefined; }
     if (!controlled && remoteStatusWindow) { remoteStatusWindow.destroy(); remoteStatusWindow = undefined; }
+    if (!controlled || !remote?.permissions.control) void remoteInput.stop();
   };
   session.on('state', state => {
     for (const target of [window, remoteControlWindow, remoteStatusWindow]) if (target && !target.isDestroyed()) target.webContents.send('session:state', state);
@@ -204,5 +215,5 @@ app.on('window-all-closed', () => app.quit());
 app.on('before-quit', event => {
   const rtcStopped = rtcNegotiation?.dispose();
   session?.stop();
-  if (!quitting && media) { event.preventDefault(); quitting = true; void Promise.all([rtcStopped, rtcDeviceTest?.stop(), media.stop()]).finally(() => app.quit()); }
+  if (!quitting && media) { event.preventDefault(); quitting = true; void Promise.all([rtcStopped, rtcDeviceTest?.stop(), media.stop(), remoteInput?.stop()]).finally(() => app.quit()); }
 });

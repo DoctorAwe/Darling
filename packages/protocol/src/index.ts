@@ -37,6 +37,14 @@ export const RemoteSignal = z.discriminatedUnion('kind', [
   z.object({ sessionId: z.string().uuid(), generation: z.literal(1), kind: z.literal('ice'), candidate: z.string().max(2048), sdpMid: z.string().max(256).nullable(), sdpMLineIndex: z.number().int().min(0).max(255).nullable() }).strict(),
 ]);
 export type RemoteSignal = z.infer<typeof RemoteSignal>;
+export const RemoteInputEvent = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('pointer.move'), x: z.number().min(0).max(1), y: z.number().min(0).max(1) }).strict(),
+  z.object({ type: z.literal('pointer.button'), button: z.enum(['left', 'middle', 'right']), down: z.boolean() }).strict(),
+  z.object({ type: z.literal('pointer.wheel'), deltaX: z.number().int().min(-1200).max(1200), deltaY: z.number().int().min(-1200).max(1200) }).strict(),
+  z.object({ type: z.literal('key'), code: z.string().regex(/^(?:Key[A-Z]|Digit[0-9]|F(?:[1-9]|1[0-2])|Arrow(?:Up|Down|Left|Right)|(?:Backspace|Tab|Enter|Escape|Space|Insert|Delete|Home|End|PageUp|PageDown)|(?:Shift|Control|Alt|Meta)(?:Left|Right)|(?:CapsLock|NumLock|ScrollLock)|Numpad(?:[0-9]|Add|Subtract|Multiply|Divide|Decimal|Enter))$/).max(24), down: z.boolean() }).strict(),
+  z.object({ type: z.literal('release') }).strict(),
+]);
+export type RemoteInputEvent = z.infer<typeof RemoteInputEvent>;
 export const ClientPacket = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('call.ready'), payload: z.object({ callId: z.string().uuid() }) }),
   z.object({ ...base, type: z.literal('rtc.config'), payload: z.object({}) }),
@@ -116,6 +124,7 @@ export interface DesktopApi {
   remoteReady(sessionId: string): Promise<void>;
   remoteDrainSignals(sessionId: string): Promise<RemoteSignal[]>;
   subscribeRemoteSignal(listener: (signal: RemoteSignal) => void): () => void;
+  remoteInput(sessionId: string, event: RemoteInputEvent): Promise<void>;
   mediaSnapshot(): Promise<MediaState>;
   mediaInspect(): Promise<MediaState>;
   audioPreferenceGet(pair: { inputId: string; outputId: string }): Promise<{ aecEnabled: boolean; saved: boolean }>;
