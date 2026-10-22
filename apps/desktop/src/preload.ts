@@ -5,6 +5,15 @@ const api: DesktopApi = {
   callAudio: (callId, micMuted, speakerMuted) => ipcRenderer.invoke('voice:audio', callId, micMuted, speakerMuted),
   remoteAction: (action, sessionId, permissions) => ipcRenderer.invoke('remote:action', action, sessionId, permissions),
   remotePermissions: (sessionId, permissions) => ipcRenderer.invoke('remote:permissions', sessionId, permissions),
+  remoteIceConfig: () => ipcRenderer.invoke('remote:ice'),
+  remoteSignal: signal => ipcRenderer.invoke('remote:signal', signal),
+  remoteReady: sessionId => ipcRenderer.invoke('remote:ready', sessionId),
+  remoteDrainSignals: sessionId => ipcRenderer.invoke('remote:drain-signals', sessionId),
+  subscribeRemoteSignal: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, signal: Parameters<typeof listener>[0]) => listener(signal);
+    ipcRenderer.on('remote:signal', handler);
+    return () => ipcRenderer.removeListener('remote:signal', handler);
+  },
   voiceConfigure: value => ipcRenderer.invoke('voice:configure', value),
   rtcDeviceSnapshot: () => ipcRenderer.invoke('rtc-device:snapshot'),
   rtcDeviceStart: value => ipcRenderer.invoke('rtc-device:start', value),

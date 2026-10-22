@@ -111,6 +111,11 @@ export interface DesktopApi {
   callAction(action: 'invite' | 'accept' | 'end', callId?: string): Promise<{ ok: boolean; error?: string }>;
   remoteAction(action: 'invite' | 'accept' | 'end', sessionId?: string, permissions?: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;
   remotePermissions(sessionId: string, permissions: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;
+  remoteIceConfig(): Promise<IceConfig>;
+  remoteSignal(signal: RemoteSignal): Promise<void>;
+  remoteReady(sessionId: string): Promise<void>;
+  remoteDrainSignals(sessionId: string): Promise<RemoteSignal[]>;
+  subscribeRemoteSignal(listener: (signal: RemoteSignal) => void): () => void;
   mediaSnapshot(): Promise<MediaState>;
   mediaInspect(): Promise<MediaState>;
   audioPreferenceGet(pair: { inputId: string; outputId: string }): Promise<{ aecEnabled: boolean; saved: boolean }>;

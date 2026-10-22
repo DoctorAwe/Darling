@@ -8,6 +8,7 @@ import './call.css';
 import { AudioPanel } from './AudioPanel';
 import { CallPanel } from './CallPanel';
 import { Icon } from './Icon';
+import { RemoteDesktopSurface } from './RemoteDesktopSurface';
 declare global { interface Window { darling: DesktopApi } }
 const avatars = { dva: dvaAvatar, mercy: mercyAvatar };
 const names = { dva: 'D.Va', mercy: 'Mercy' };
@@ -15,27 +16,10 @@ const initial: Snapshot = { status: 'connecting', online: [], messages: [], pend
 function Avatar({ user, small = false }: { user: User; small?: boolean }) {
   return <img className={`avatar ${small ? 'small' : ''}`} src={avatars[user]} alt={names[user]} />;
 }
-function elapsed(startedAt?: number) {
-  const seconds = Math.max(0, Math.floor((Date.now() - (startedAt ?? Date.now())) / 1000));
-  return `${String(Math.floor(seconds / 3600)).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
-}
 function RemoteSurface({ surface }: { surface: 'remote-control' | 'remote-status' }) {
-  const [state, setState] = useState(initial); const [, tick] = useState(0);
+  const [state, setState] = useState(initial);
   useEffect(() => { const off = window.darling.subscribe(setState); void window.darling.snapshot().then(setState); return off; }, []);
-  useEffect(() => { const id = setInterval(() => tick(v => v + 1), 1000); return () => clearInterval(id); }, []);
-  const remote = state.remote;
-  if (!remote || !['connecting', 'active'].includes(remote.phase)) return <div className={`remote-surface ${surface}`}><span>远程桌面会话已结束</span></div>;
-  const end = () => void window.darling.remoteAction('end', remote.sessionId);
-  if (surface === 'remote-status') return <div className="remote-surface remote-status">
-    <span className="remote-live-dot"/><strong>正在被 {names[remote.controller]} 远程连接</strong><time>{elapsed(remote.startedAt)}</time><span className="quality">网络 · 检测中</span>
-    <button aria-pressed={remote.permissions.control} onClick={() => void window.darling.remotePermissions(remote.sessionId, { ...remote.permissions, control: !remote.permissions.control })}>{remote.permissions.control ? '允许操作' : '仅观看'}</button>
-    <button aria-pressed={remote.permissions.audio} onClick={() => void window.darling.remotePermissions(remote.sessionId, { ...remote.permissions, audio: !remote.permissions.audio })}>{remote.permissions.audio ? '声音已开' : '声音关闭'}</button>
-    <button className="remote-end" onClick={end}>断开</button>
-  </div>;
-  return <div className="remote-surface remote-control">
-    <header><div><strong>{names[remote.controlled]} 的桌面</strong><span>{remote.phase === 'active' ? elapsed(remote.startedAt) : '正在建立媒体通道'}</span></div><div><span>连接路径 · 检测中</span><span>{remote.permissions.control ? '可操作' : '仅观看'}</span><span>{remote.permissions.audio ? '声音开启' : '声音关闭'}</span><button className="remote-end" onClick={end}>断开连接</button></div></header>
-    <div className="remote-stage"><Icon name="desktop"/><h1>正在准备远程画面</h1><p>信令和权限已建立；屏幕视频、系统声音与输入控制将在媒体通道接入后显示于此。</p></div>
-  </div>;
+  return <RemoteDesktopSurface surface={surface} state={state}/>;
 }
 function App() {
   const [state, setState] = useState(initial);

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, session as electronSession, webContents } from 'electron';
 import { join, resolve } from 'node:path';
 import { release } from 'node:os';
 import { Session } from './session';
@@ -10,12 +10,14 @@ import { RtcDeviceTest } from './rtc-device-test';
 import { DeviceAudio } from './rtc-process';
 import { existsSync } from 'node:fs';
 import { resolveAec3Enabled } from './aec-mode';
+import { RemoteSignal } from '../../../packages/protocol/src/index';
 
 if (process.env.DARLING_USER_DATA) app.setPath('userData', resolve(process.env.DARLING_USER_DATA));
 let session: Session;
 let window: BrowserWindow;
 let remoteControlWindow: BrowserWindow | undefined;
 let remoteStatusWindow: BrowserWindow | undefined;
+const pendingRemoteSignals: Array<ReturnType<typeof RemoteSignal.parse>> = [];
 let media: MediaHost;
 let rtcNegotiation: RtcNegotiation | undefined;
 let rtcDeviceTest: RtcDeviceTest;
@@ -61,6 +63,13 @@ void app.whenReady().then(() => {
   ipcMain.handle('session:snapshot', () => structuredClone(session.state));
   ipcMain.handle('remote:action', (_event, action: unknown, sessionId: unknown, permissions: unknown) => session.remoteAction(action, sessionId, permissions));
   ipcMain.handle('remote:permissions', (_event, sessionId: unknown, permissions: unknown) => session.remotePermissions(sessionId, permissions));
+  ipcMain.handle('remote:ice', async () => { await session.refreshIce(); const ice = session.getIceConfig(); if (!ice) throw new Error('中继配置不可用'); return ice; });
+  ipcMain.handle('remote:signal', (_event, value: unknown) => session.sendRemoteSignal(RemoteSignal.parse(value)));
+  ipcMain.handle('remote:ready', (_event, sessionId: unknown) => { if (typeof sessionId !== 'string' || session.state.remote?.sessionId !== sessionId) throw new Error('远程桌面会话已变化'); session.remoteReady(sessionId); });
+  ipcMain.handle('remote:drain-signals', (_event, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || session.state.remote?.sessionId !== sessionId) return [];
+    return pendingRemoteSignals.splice(0).filter(signal => signal.sessionId === sessionId);
+  });
   ipcMain.handle('voice:audio', async (_event, callId: unknown, micMuted: unknown, speakerMuted: unknown) => {
     if (typeof callId !== 'string' || typeof micMuted !== 'boolean' || typeof speakerMuted !== 'boolean' ||
         session.state.call?.callId !== callId || session.state.call.phase !== 'active' || !rtcNegotiation) throw new Error('当前无法调整通话');
@@ -155,6 +164,14 @@ void app.whenReady().then(() => {
     remoteWindow.on('closed', () => { if (surface === 'remote-control') remoteControlWindow = undefined; else remoteStatusWindow = undefined; });
     return remoteWindow;
   };
+  electronSession.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    const remote = session.state.remote;
+    const requester = request.frame ? webContents.fromFrame(request.frame) : undefined;
+    if (!remote || remote.controlled !== session.state.user || !['connecting', 'active'].includes(remote.phase) || !remoteStatusWindow || remoteStatusWindow.isDestroyed() || requester?.id !== remoteStatusWindow.webContents.id) return callback({});
+    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false });
+    const primary = sources[0]; if (!primary) return callback({});
+    callback({ video: primary, ...(request.audioRequested && remote.permissions.audio ? { audio: 'loopback' as const } : {}) });
+  });
   const syncRemoteWindows = (state: typeof session.state) => {
     const remote = state.remote; const live = remote && ['connecting', 'active'].includes(remote.phase);
     const controller = live && remote.controller === state.user;
@@ -167,6 +184,10 @@ void app.whenReady().then(() => {
   session.on('state', state => {
     for (const target of [window, remoteControlWindow, remoteStatusWindow]) if (target && !target.isDestroyed()) target.webContents.send('session:state', state);
     syncRemoteWindows(state);
+  });
+  session.on('remote.signal', value => {
+    const signal = RemoteSignal.parse(value); pendingRemoteSignals.push(signal); if (pendingRemoteSignals.length > 128) pendingRemoteSignals.shift();
+    for (const target of [remoteControlWindow, remoteStatusWindow]) if (target && !target.isDestroyed()) target.webContents.send('remote:signal', signal);
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
