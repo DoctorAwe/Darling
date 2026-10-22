@@ -162,13 +162,22 @@ void app.whenReady().then(() => {
       width: controlled ? 620 : 1280, height: controlled ? 78 : 800,
       minWidth: controlled ? 620 : 900, minHeight: controlled ? 78 : 600,
       frame: !controlled, resizable: !controlled, maximizable: !controlled,
+      autoHideMenuBar: true,
       alwaysOnTop: controlled, skipTaskbar: controlled, backgroundColor: '#10131b',
       title: controlled ? 'Darling 远程控制状态' : 'Darling 远程桌面', show: false,
       webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, autoplayPolicy: 'no-user-gesture-required' },
     });
+    remoteWindow.setMenu(null);
+    remoteWindow.setMenuBarVisibility(false);
     remoteWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     remoteWindow.webContents.on('will-navigate', event => event.preventDefault());
-    remoteWindow.once('ready-to-show', () => { if (!controlled) remoteWindow.maximize(); remoteWindow.show(); });
+    remoteWindow.once('ready-to-show', () => {
+      if (controlled) {
+        const { x, y, width } = screen.getPrimaryDisplay().workArea;
+        remoteWindow.setPosition(Math.round(x + (width - remoteWindow.getBounds().width) / 2), y, false);
+      } else remoteWindow.maximize();
+      remoteWindow.show();
+    });
     void remoteWindow.loadFile(join(__dirname, 'renderer/index.html'), { query: { surface } });
     remoteWindow.on('closed', () => { if (surface === 'remote-control') remoteControlWindow = undefined; else remoteStatusWindow = undefined; });
     return remoteWindow;
