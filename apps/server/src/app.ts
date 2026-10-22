@@ -6,6 +6,7 @@ import { MessageStore } from './store';
 import { Calls } from './calls';
 import { otherUser } from '../../../packages/protocol/src/index';
 import { TurnConfig, issueIce } from './ice';
+import { RemoteDesktops } from './remote-desktops';
 
 export async function createServer(options: { database: string; users: Record<User, string>; turn?: TurnConfig }) {
   const turn = options.turn === undefined ? undefined : TurnConfig.parse(options.turn);
@@ -24,6 +25,9 @@ export async function createServer(options: { database: string; users: Record<Us
   };
   const calls = new Calls(call => {
     for (const socket of sessions.values()) send(socket, { version: 1, type: 'call.state', payload: { call } });
+  });
+  const remotes = new RemoteDesktops(session => {
+    for (const socket of sessions.values()) send(socket, { version: 1, type: 'remote.state', payload: { session } });
   });
   await app.register(websocket, { options: { maxPayload: 64 * 1024 } });
   app.get('/health', async () => ({ ok: true, protocolVersion: 1, media: false }));
@@ -57,6 +61,7 @@ export async function createServer(options: { database: string; users: Record<Us
         sessions.set(user, socket);
         if (previous && previous !== socket) {
           calls.disconnect('replaced');
+          remotes.disconnect('replaced');
           send(previous, { version: 1, type: 'session.replaced', payload: {} });
           previous.close(4001, 'Session replaced');
         }
@@ -79,6 +84,16 @@ export async function createServer(options: { database: string; users: Record<Us
         } catch { fail('INVALID_RTC_STATE', '协商顺序、角色、通话或候选数量不符合要求'); }
         return;
       }
+      if (packet.type === 'remote.signal') {
+        const peer = sessions.get(otherUser(user));
+        if (!peer || peer.readyState !== 1 || peer.bufferedAmount > 1024 * 1024) { remotes.disconnect('disconnected'); return fail('PEER_UNAVAILABLE', '对端连接不可用'); }
+        try {
+          const signal = remotes.signal(user, packet.payload);
+          send(peer, { version: 1, type: 'remote.signal', payload: { sender: user, signal } });
+          send(socket, { version: 1, type: 'remote.ack', requestId: packet.requestId, payload: { sessionId: signal.sessionId, generation: signal.generation } });
+        } catch { fail('INVALID_REMOTE_STATE', '远程桌面协商顺序、角色或候选数量不符合要求'); }
+        return;
+      }
       if (packet.type === 'call.invite' || packet.type === 'call.accept' || packet.type === 'call.end' || packet.type === 'call.sync' || packet.type === 'call.ready') {
         try {
           const call = packet.type === 'call.invite' ? calls.invite(user, sessions.get(otherUser(user))?.readyState === 1)
@@ -87,6 +102,17 @@ export async function createServer(options: { database: string; users: Record<Us
             : packet.type === 'call.end' ? calls.end(user, packet.payload.callId) : calls.snapshot();
           send(socket, { version: 1, type: 'call.state', requestId: packet.requestId, payload: { call } });
         } catch (error) { fail(error instanceof Error ? error.message : 'CALL_ERROR', '通话请求无效或对方不在线'); }
+        return;
+      }
+      if (packet.type === 'remote.invite' || packet.type === 'remote.accept' || packet.type === 'remote.permissions' || packet.type === 'remote.end' || packet.type === 'remote.sync' || packet.type === 'remote.ready') {
+        try {
+          const session = packet.type === 'remote.invite' ? remotes.invite(user, sessions.get(otherUser(user))?.readyState === 1)
+            : packet.type === 'remote.accept' ? remotes.accept(user, packet.payload.sessionId, packet.payload.permissions)
+            : packet.type === 'remote.permissions' ? remotes.permissions(user, packet.payload.sessionId, packet.payload.permissions)
+            : packet.type === 'remote.ready' ? remotes.readyUser(user, packet.payload.sessionId)
+            : packet.type === 'remote.end' ? remotes.end(user, packet.payload.sessionId) : remotes.snapshot();
+          send(socket, { version: 1, type: 'remote.state', requestId: packet.requestId, payload: { session } });
+        } catch (error) { fail(error instanceof Error ? error.message : 'REMOTE_ERROR', '远程桌面请求无效或对方不在线'); }
         return;
       }
       try {
@@ -101,10 +127,10 @@ export async function createServer(options: { database: string; users: Record<Us
     });
     socket.on('close', () => {
       clearTimeout(loginTimeout); clearInterval(heartbeat); sockets.delete(socket);
-      if (user && sessions.get(user) === socket) { sessions.delete(user); calls.disconnect('disconnected'); presence(); }
+      if (user && sessions.get(user) === socket) { sessions.delete(user); calls.disconnect('disconnected'); remotes.disconnect('disconnected'); presence(); }
     });
   });
-  app.addHook('preClose', async () => { calls.disconnect('server-shutdown'); for (const socket of sockets) socket.terminate(); });
+  app.addHook('preClose', async () => { calls.disconnect('server-shutdown'); remotes.disconnect('server-shutdown'); for (const socket of sockets) socket.terminate(); });
   app.addHook('onClose', async () => store.close());
   return app;
 }

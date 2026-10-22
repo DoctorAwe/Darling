@@ -14,6 +14,8 @@ import { resolveAec3Enabled } from './aec-mode';
 if (process.env.DARLING_USER_DATA) app.setPath('userData', resolve(process.env.DARLING_USER_DATA));
 let session: Session;
 let window: BrowserWindow;
+let remoteControlWindow: BrowserWindow | undefined;
+let remoteStatusWindow: BrowserWindow | undefined;
 let media: MediaHost;
 let rtcNegotiation: RtcNegotiation | undefined;
 let rtcDeviceTest: RtcDeviceTest;
@@ -57,6 +59,8 @@ void app.whenReady().then(() => {
     webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, autoplayPolicy: 'no-user-gesture-required' },
   });
   ipcMain.handle('session:snapshot', () => structuredClone(session.state));
+  ipcMain.handle('remote:action', (_event, action: unknown, sessionId: unknown, permissions: unknown) => session.remoteAction(action, sessionId, permissions));
+  ipcMain.handle('remote:permissions', (_event, sessionId: unknown, permissions: unknown) => session.remotePermissions(sessionId, permissions));
   ipcMain.handle('voice:audio', async (_event, callId: unknown, micMuted: unknown, speakerMuted: unknown) => {
     if (typeof callId !== 'string' || typeof micMuted !== 'boolean' || typeof speakerMuted !== 'boolean' ||
         session.state.call?.callId !== callId || session.state.call.phase !== 'active' || !rtcNegotiation) throw new Error('当前无法调整通话');
@@ -128,12 +132,42 @@ void app.whenReady().then(() => {
   window.webContents.on('render-process-gone', () => { void rtcNegotiation?.stop(); if (session.state.call && session.state.call.phase !== 'ended') session.callAction('end', session.state.call.callId); void rtcDeviceTest.stop(); void media.stop(); });
   window.webContents.on('did-start-loading', () => { void rtcDeviceTest.stop(); if (session.state.call && session.state.call.phase !== 'ended') { void rtcNegotiation?.stop(); session.callAction('end', session.state.call.callId); } });
   media.on('state', state => { if (!window.isDestroyed()) window.webContents.send('media:state', state); });
-  ipcMain.on('window:action', (_event, action: unknown) => {
-    if (action === 'close') window.close();
-    else if (action === 'minimize') window.minimize();
-    else if (action === 'maximize') window.isMaximized() ? window.unmaximize() : window.maximize();
+  ipcMain.on('window:action', (event, action: unknown) => {
+    const target = BrowserWindow.fromWebContents(event.sender); if (!target) return;
+    if (action === 'close') target.close();
+    else if (action === 'minimize') target.minimize();
+    else if (action === 'maximize' && target.isMaximizable()) target.isMaximized() ? target.unmaximize() : target.maximize();
   });
-  session.on('state', state => { if (!window.isDestroyed()) window.webContents.send('session:state', state); });
+  const openRemoteSurface = (surface: 'remote-control' | 'remote-status') => {
+    const controlled = surface === 'remote-status';
+    const remoteWindow = new BrowserWindow({
+      width: controlled ? 620 : 1280, height: controlled ? 78 : 800,
+      minWidth: controlled ? 620 : 900, minHeight: controlled ? 78 : 600,
+      frame: !controlled, resizable: !controlled, maximizable: !controlled,
+      alwaysOnTop: controlled, skipTaskbar: controlled, backgroundColor: '#10131b',
+      title: controlled ? 'Darling 远程控制状态' : 'Darling 远程桌面', show: false,
+      webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, autoplayPolicy: 'no-user-gesture-required' },
+    });
+    remoteWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    remoteWindow.webContents.on('will-navigate', event => event.preventDefault());
+    remoteWindow.once('ready-to-show', () => { if (!controlled) remoteWindow.maximize(); remoteWindow.show(); });
+    void remoteWindow.loadFile(join(__dirname, 'renderer/index.html'), { query: { surface } });
+    remoteWindow.on('closed', () => { if (surface === 'remote-control') remoteControlWindow = undefined; else remoteStatusWindow = undefined; });
+    return remoteWindow;
+  };
+  const syncRemoteWindows = (state: typeof session.state) => {
+    const remote = state.remote; const live = remote && ['connecting', 'active'].includes(remote.phase);
+    const controller = live && remote.controller === state.user;
+    const controlled = live && remote.controlled === state.user;
+    if (controller && !remoteControlWindow) remoteControlWindow = openRemoteSurface('remote-control');
+    if (controlled && !remoteStatusWindow) remoteStatusWindow = openRemoteSurface('remote-status');
+    if (!controller && remoteControlWindow) { remoteControlWindow.destroy(); remoteControlWindow = undefined; }
+    if (!controlled && remoteStatusWindow) { remoteStatusWindow.destroy(); remoteStatusWindow = undefined; }
+  };
+  session.on('state', state => {
+    for (const target of [window, remoteControlWindow, remoteStatusWindow]) if (target && !target.isDestroyed()) target.webContents.send('session:state', state);
+    syncRemoteWindows(state);
+  });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   const showWindow = () => { if (!window.isDestroyed() && !window.isVisible()) window.show(); };

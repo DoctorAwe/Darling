@@ -24,6 +24,19 @@ export const RtcSignal = z.discriminatedUnion('kind', [
   z.object({ callId: z.string().uuid(), generation: z.literal(1), kind: z.literal('ice'), candidate: z.string().max(2048), sdpMid: z.string().max(256).nullable(), sdpMLineIndex: z.number().int().min(0).max(255).nullable() }).strict(),
 ]);
 export type RtcSignal = z.infer<typeof RtcSignal>;
+export const RemoteSessionState = z.object({
+  sessionId: z.string().uuid(), controller: User, controlled: User,
+  phase: z.enum(['ringing', 'connecting', 'active', 'ended']),
+  permissions: z.object({ control: z.boolean(), audio: z.boolean() }).strict(),
+  reason: z.enum(['cancelled', 'rejected', 'hangup', 'timeout', 'disconnected', 'replaced', 'server-shutdown']).optional(),
+  deadline: z.number().int().nonnegative(), startedAt: z.number().int().nonnegative().optional(),
+}).strict();
+export type RemoteSessionState = z.infer<typeof RemoteSessionState>;
+export const RemoteSignal = z.discriminatedUnion('kind', [
+  z.object({ sessionId: z.string().uuid(), generation: z.literal(1), kind: z.enum(['offer', 'answer']), sdp: z.string().min(1).max(64000) }).strict(),
+  z.object({ sessionId: z.string().uuid(), generation: z.literal(1), kind: z.literal('ice'), candidate: z.string().max(2048), sdpMid: z.string().max(256).nullable(), sdpMLineIndex: z.number().int().min(0).max(255).nullable() }).strict(),
+]);
+export type RemoteSignal = z.infer<typeof RemoteSignal>;
 export const ClientPacket = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('call.ready'), payload: z.object({ callId: z.string().uuid() }) }),
   z.object({ ...base, type: z.literal('rtc.config'), payload: z.object({}) }),
@@ -32,6 +45,13 @@ export const ClientPacket = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('call.accept'), payload: z.object({ callId: z.string().uuid() }) }),
   z.object({ ...base, type: z.literal('call.end'), payload: z.object({ callId: z.string().uuid() }) }),
   z.object({ ...base, type: z.literal('call.sync'), payload: z.object({}) }),
+  z.object({ ...base, type: z.literal('remote.invite'), payload: z.object({}) }),
+  z.object({ ...base, type: z.literal('remote.accept'), payload: z.object({ sessionId: z.string().uuid(), permissions: z.object({ control: z.boolean(), audio: z.boolean() }).strict() }) }),
+  z.object({ ...base, type: z.literal('remote.permissions'), payload: z.object({ sessionId: z.string().uuid(), permissions: z.object({ control: z.boolean(), audio: z.boolean() }).strict() }) }),
+  z.object({ ...base, type: z.literal('remote.ready'), payload: z.object({ sessionId: z.string().uuid() }) }),
+  z.object({ ...base, type: z.literal('remote.end'), payload: z.object({ sessionId: z.string().uuid() }) }),
+  z.object({ ...base, type: z.literal('remote.sync'), payload: z.object({}) }),
+  z.object({ ...base, type: z.literal('remote.signal'), payload: RemoteSignal }),
   z.object({ ...base, type: z.literal('auth.login'), payload: z.object({ username: User, password: z.string().min(1).max(512) }) }),
   z.object({ ...base, type: z.literal('message.send'), payload: z.object({ clientId: z.string().uuid(), text: Text }) }),
   z.object({ ...base, type: z.literal('message.sync'), payload: z.object({ after: z.number().int().min(0) }) }),
@@ -44,6 +64,9 @@ export const ServerPacket = z.discriminatedUnion('type', [
   z.object({ version: z.literal(1), type: z.literal('rtc.signal'), payload: z.object({ sender: User, signal: RtcSignal }) }),
   z.object({ version: z.literal(1), type: z.literal('rtc.ack'), requestId: z.string(), payload: z.object({ callId: z.string().uuid(), generation: z.literal(1) }) }),
   z.object({ version: z.literal(1), type: z.literal('call.state'), requestId: z.string().optional(), payload: z.object({ call: CallState.nullable() }) }),
+  z.object({ version: z.literal(1), type: z.literal('remote.state'), requestId: z.string().optional(), payload: z.object({ session: RemoteSessionState.nullable() }) }),
+  z.object({ version: z.literal(1), type: z.literal('remote.signal'), payload: z.object({ sender: User, signal: RemoteSignal }) }),
+  z.object({ version: z.literal(1), type: z.literal('remote.ack'), requestId: z.string(), payload: z.object({ sessionId: z.string().uuid(), generation: z.literal(1) }) }),
   z.object({ version: z.literal(1), type: z.literal('auth.ok'), requestId: z.string(), payload: z.object({ user: User, ice: IceConfig.optional() }) }),
   z.object({ version: z.literal(1), type: z.literal('presence.changed'), payload: z.object({ online: z.array(User) }) }),
   z.object({ version: z.literal(1), type: z.literal('session.replaced'), payload: z.object({}) }),
@@ -67,6 +90,7 @@ export type Snapshot = {
   voiceBeta?: boolean; voiceConfigured?: boolean; voiceDetail?: string;
   remoteAudio?: { level: number | null; sampledAt: number };
   call?: CallState | null; callError?: string; callPending?: boolean;
+  remote?: RemoteSessionState | null; remoteError?: string; remotePending?: boolean;
 };
 export type RtcInputMetrics = {
   sampledAt: number; sentPackets: number | null; receivedPackets: number | null;
@@ -85,6 +109,8 @@ export interface DesktopApi {
   send(text: string): Promise<{ ok: boolean; error?: string }>;
   reload(): Promise<void>;
   callAction(action: 'invite' | 'accept' | 'end', callId?: string): Promise<{ ok: boolean; error?: string }>;
+  remoteAction(action: 'invite' | 'accept' | 'end', sessionId?: string, permissions?: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;
+  remotePermissions(sessionId: string, permissions: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;
   mediaSnapshot(): Promise<MediaState>;
   mediaInspect(): Promise<MediaState>;
   audioPreferenceGet(pair: { inputId: string; outputId: string }): Promise<{ aecEnabled: boolean; saved: boolean }>;

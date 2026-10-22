@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { z } from 'zod';
-import { ClientConfig, ServerPacket, Text, User, type ClientPacket, type Message, type PendingMessage, type Snapshot } from '../../../packages/protocol/src/index';
+import { ClientConfig, RemoteSignal, ServerPacket, Text, User, type ClientPacket, type Message, type PendingMessage, type Snapshot } from '../../../packages/protocol/src/index';
 import type { IceConfig } from '../../../packages/protocol/src/index';
 import { RtcSignaling } from './rtc-signaling';
 
@@ -17,6 +17,12 @@ export class Session extends EventEmitter {
   });
   // Internal native-adapter API: deliberately not exposed through preload.
   sendRtcSignal(signal: unknown): Promise<void> { return this.rtc.send(signal); }
+  sendRemoteSignal(signal: unknown) {
+    const parsed = RemoteSignal.parse(signal);
+    if (this.state.remote?.sessionId !== parsed.sessionId || !['connecting', 'active'].includes(this.state.remote.phase)) throw new Error('Remote session unavailable');
+    this.transmit({ version: 1, type: 'remote.signal', requestId: randomUUID(), payload: parsed });
+  }
+  remoteReady(sessionId: string) { this.transmit({ version: 1, type: 'remote.ready', requestId: randomUUID(), payload: { sessionId } }); }
   configureVoice(enabled: boolean, configured: boolean) {
     this.state.voiceBeta = enabled; this.state.voiceConfigured = configured; this.state.mediaAvailable = enabled && configured; this.emitState();
   }
@@ -54,8 +60,12 @@ export class Session extends EventEmitter {
     return structuredClone(this.ice);
   }
   private callRequest?: { id: string; timer: ReturnType<typeof setTimeout> };
+  private remoteRequest?: { id: string; timer: ReturnType<typeof setTimeout> };
   private clearCallRequest() {
     clearTimeout(this.callRequest?.timer); this.callRequest = undefined; this.state.callPending = false;
+  }
+  private clearRemoteRequest() {
+    clearTimeout(this.remoteRequest?.timer); this.remoteRequest = undefined; this.state.remotePending = false;
   }
   constructor(configPath: string, private dataDir: string) {
     super();
@@ -88,7 +98,7 @@ export class Session extends EventEmitter {
   stop() {
     this.rtc.clear();
     this.ice = undefined;
-    this.clearCallRequest(); this.state.call = null; this.state.callError = undefined;
+    this.clearCallRequest(); this.clearRemoteRequest(); this.state.call = null; this.state.callError = undefined; this.state.remote = null; this.state.remoteError = undefined;
     this.stopped = true; this.generation++;
     clearTimeout(this.timer); clearInterval(this.watchdog);
     this.socket?.removeAllListeners(); this.socket?.on('error', () => {}); this.socket?.terminate();
@@ -121,12 +131,13 @@ export class Session extends EventEmitter {
         this.state.status = 'online'; this.state.detail = '已连接 · 消息同步中';
         this.requestSync();
         this.requestCall('call.sync', {});
+        this.requestRemote('remote.sync', {});
       } else if (packet.type === 'rtc.config') { this.ice = packet.payload; this.emit('ice.updated', packet.requestId); return; }
       else if (packet.type === 'presence.changed') this.state.online = packet.payload.online;
       else if (packet.type === 'session.replaced') {
         this.rtc.clear();
         this.ice = undefined;
-        this.clearCallRequest(); this.state.call = null;
+        this.clearCallRequest(); this.clearRemoteRequest(); this.state.call = null; this.state.remote = null;
         this.stopped = true; this.state.status = 'replaced'; this.state.detail = '此账号已在其他客户端登录，自动重连已停止';
       } else if (packet.type === 'call.state') {
         if (packet.requestId && packet.requestId !== this.callRequest?.id) return;
@@ -138,6 +149,15 @@ export class Session extends EventEmitter {
         this.rtc.receive(packet.payload.sender, packet.payload.signal); return;
       } else if (packet.type === 'rtc.ack') {
         this.rtc.acknowledge(packet.requestId, packet.payload.callId, packet.payload.generation); return;
+      } else if (packet.type === 'remote.state') {
+        if (packet.requestId && packet.requestId !== this.remoteRequest?.id) return;
+        if (packet.requestId) this.clearRemoteRequest();
+        this.state.remote = packet.payload.session; this.state.remoteError = undefined;
+        this.emit('remote.state', structuredClone(packet.payload.session));
+      } else if (packet.type === 'remote.signal') {
+        this.emit('remote.signal', structuredClone(packet.payload.signal)); return;
+      } else if (packet.type === 'remote.ack') {
+        this.emit('remote.ack', packet.requestId, packet.payload.sessionId); return;
       } else if (packet.type === 'message.stored') {
         if (packet.requestId) this.inflight.delete(packet.requestId);
         this.merge(packet.payload);
@@ -151,6 +171,9 @@ export class Session extends EventEmitter {
         else { this.state.detail = '已连接 · 文字聊天就绪'; this.flush(); }
       } else if (packet.type === 'error') {
         if (packet.requestId && this.rtc.reject(packet.requestId, packet.payload.message)) return;
+        if (packet.requestId && packet.requestId === this.remoteRequest?.id) {
+          this.clearRemoteRequest(); this.state.remoteError = packet.payload.message; this.emitState(); return;
+        }
         if (packet.requestId && packet.requestId === this.callRequest?.id) {
           this.clearCallRequest(); this.state.callError = packet.payload.message; this.emitState(); return;
         }
@@ -165,7 +188,7 @@ export class Session extends EventEmitter {
       if (generation !== this.generation) return;
       this.rtc.clear();
       clearInterval(this.watchdog); this.inflight.clear(); this.syncRequest = undefined;
-      this.clearCallRequest(); this.state.call = null; this.state.callError = undefined;
+      this.clearCallRequest(); this.clearRemoteRequest(); this.state.call = null; this.state.callError = undefined; this.state.remote = null; this.state.remoteError = undefined;
       this.state.online = [];
       this.ice = undefined;
       if (!this.stopped) {
@@ -189,6 +212,17 @@ export class Session extends EventEmitter {
     if (type === 'call.accept' || type === 'call.end') this.transmit({ version: 1, type, requestId, payload: { callId: payload.callId! } });
     else this.transmit({ version: 1, type, requestId, payload: {} });
   }
+  private requestRemote(type: 'remote.sync' | 'remote.invite' | 'remote.accept' | 'remote.permissions' | 'remote.end', payload: { sessionId?: string; permissions?: { control: boolean; audio: boolean } }) {
+    const requestId = randomUUID(); this.clearRemoteRequest(); this.state.remotePending = true; this.state.remoteError = undefined;
+    const timer = setTimeout(() => {
+      if (this.remoteRequest?.id !== requestId) return;
+      this.clearRemoteRequest(); this.state.remoteError = '远程桌面请求超时'; this.socket?.terminate(); this.emitState();
+    }, 10000);
+    this.remoteRequest = { id: requestId, timer };
+    if (type === 'remote.accept' || type === 'remote.permissions') this.transmit({ version: 1, type, requestId, payload: { sessionId: payload.sessionId!, permissions: payload.permissions! } });
+    else if (type === 'remote.end') this.transmit({ version: 1, type, requestId, payload: { sessionId: payload.sessionId! } });
+    else this.transmit({ version: 1, type, requestId, payload: {} });
+  }
   callAction(action: unknown, callId?: unknown): { ok: boolean; error?: string } {
     if (!['invite', 'accept', 'end'].includes(action as string)) return { ok: false, error: '无效通话操作' };
     if (this.stopped || this.state.status !== 'online' || this.socket?.readyState !== WebSocket.OPEN) return { ok: false, error: '请先连接服务器' };
@@ -206,6 +240,30 @@ export class Session extends EventEmitter {
     }
     if (!call || call.phase === 'ended' || call.callId !== callId) return { ok: false, error: '通话已结束或状态已变化' };
     this.requestCall('call.end', { callId: call.callId }); this.emitState(); return { ok: true };
+  }
+  remoteAction(action: unknown, sessionId?: unknown, permissions?: unknown): { ok: boolean; error?: string } {
+    if (!['invite', 'accept', 'end'].includes(action as string)) return { ok: false, error: '无效远程桌面操作' };
+    if (this.stopped || this.state.status !== 'online' || this.socket?.readyState !== WebSocket.OPEN) return { ok: false, error: '请先连接服务器' };
+    if (this.state.remotePending) return { ok: false, error: '正在等待远程桌面请求确认' };
+    const current = this.state.remote;
+    if (action === 'invite') {
+      if (current && current.phase !== 'ended') return { ok: false, error: '已有远程桌面会话' };
+      this.requestRemote('remote.invite', {}); this.emitState(); return { ok: true };
+    }
+    if (typeof sessionId !== 'string' || current?.sessionId !== sessionId) return { ok: false, error: '远程桌面邀请已变化' };
+    if (action === 'accept') {
+      if (current.phase !== 'ringing' || current.controlled !== this.state.user || !permissions || typeof permissions !== 'object') return { ok: false, error: '当前无法接听远程桌面' };
+      const value = permissions as { control?: unknown; audio?: unknown };
+      if (typeof value.control !== 'boolean' || typeof value.audio !== 'boolean') return { ok: false, error: '授权选项无效' };
+      this.requestRemote('remote.accept', { sessionId, permissions: { control: value.control, audio: value.audio } }); this.emitState(); return { ok: true };
+    }
+    this.requestRemote('remote.end', { sessionId }); this.emitState(); return { ok: true };
+  }
+  remotePermissions(sessionId: unknown, permissions: unknown): { ok: boolean; error?: string } {
+    const current = this.state.remote; const value = permissions as { control?: unknown; audio?: unknown } | undefined;
+    if (typeof sessionId !== 'string' || current?.sessionId !== sessionId || current.controlled !== this.state.user || !['connecting', 'active'].includes(current.phase)) return { ok: false, error: '当前无法修改远程权限' };
+    if (!value || typeof value.control !== 'boolean' || typeof value.audio !== 'boolean') return { ok: false, error: '授权选项无效' };
+    this.requestRemote('remote.permissions', { sessionId, permissions: { control: value.control, audio: value.audio } }); this.emitState(); return { ok: true };
   }
   private requestSync() {
     this.syncRequest = randomUUID();

@@ -3,6 +3,8 @@ import type { DesktopApi, Snapshot } from '../../../packages/protocol/src/index'
 import type { MediaState } from '../../../packages/protocol/src/media';
 const api: DesktopApi = {
   callAudio: (callId, micMuted, speakerMuted) => ipcRenderer.invoke('voice:audio', callId, micMuted, speakerMuted),
+  remoteAction: (action, sessionId, permissions) => ipcRenderer.invoke('remote:action', action, sessionId, permissions),
+  remotePermissions: (sessionId, permissions) => ipcRenderer.invoke('remote:permissions', sessionId, permissions),
   voiceConfigure: value => ipcRenderer.invoke('voice:configure', value),
   rtcDeviceSnapshot: () => ipcRenderer.invoke('rtc-device:snapshot'),
   rtcDeviceStart: value => ipcRenderer.invoke('rtc-device:start', value),
