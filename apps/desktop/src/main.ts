@@ -13,6 +13,12 @@ import { resolveAec3Enabled } from './aec-mode';
 import { RemoteSignal } from '../../../packages/protocol/src/index';
 import { RemoteInputGate, RemoteInputHost } from './remote-input';
 
+if (process.platform === 'win32') {
+  // Prefer the discrete adapter (typically NVIDIA on dual-GPU systems) and expose
+  // Chromium's H.264 VideoEncodeAccelerator to WebRTC. Software remains fallback.
+  app.commandLine.appendSwitch('force_high_performance_gpu');
+  app.commandLine.appendSwitch('enable-features', 'WebRtcHWH264Encoding');
+}
 if (process.env.DARLING_USER_DATA) app.setPath('userData', resolve(process.env.DARLING_USER_DATA));
 let session: Session;
 let window: BrowserWindow;

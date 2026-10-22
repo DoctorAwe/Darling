@@ -7,7 +7,7 @@ const elapsed = (startedAt?: number) => {
   const seconds = Math.max(0, Math.floor((Date.now() - (startedAt ?? Date.now())) / 1000));
   return `${String(Math.floor(seconds / 3600)).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 };
-type Telemetry = { route: 'checking' | 'direct' | 'relay'; quality: '检测中' | '优秀' | '良好' | '较差'; rttMs?: number; loss?: number };
+type Telemetry = { route: 'checking' | 'direct' | 'relay'; quality: '检测中' | '优秀' | '良好' | '较差'; rttMs?: number; loss?: number; encoder?: string; hardwareEncoder?: boolean };
 const errorText = (error: unknown) => error instanceof DOMException ? `${error.name}: ${error.message}` : error instanceof Error ? error.message : String(error);
 
 function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'controller' | 'controlled') {
@@ -17,7 +17,7 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
   useEffect(() => {
     if (!remote || !['connecting', 'active'].includes(remote.phase)) return;
     let disposed = false; let chain = Promise.resolve(); let unsubscribe: (() => void) | undefined; let statsTimer: ReturnType<typeof setInterval> | undefined;
-    const earlyIce: RTCIceCandidateInit[] = []; const signalKeys = new Set<string>(); let readySent = false;
+    const earlyIce: RTCIceCandidateInit[] = []; const signalKeys = new Set<string>(); let readySent = false; let lastEncoder = '';
     const send = (value: RemoteSignal) => window.darling.remoteSignal(value);
     const report = (stage: string, value: string) => void window.darling.remoteDiagnostic(remote.sessionId, stage, value);
     const start = async () => {
@@ -86,13 +86,16 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
       for (const value of await window.darling.remoteDrainSignals(remote.sessionId)) enqueue(value);
       statsTimer = setInterval(async () => {
         if (pc.connectionState !== 'connected') return;
-        const stats = await pc.getStats(); let pair: Record<string, any> | undefined; let inbound: Record<string, any> | undefined; const byId = new Map<string, Record<string, any>>();
-        stats.forEach(report => { const value = report as unknown as Record<string, any>; byId.set(String(value.id), value); if (value.type === 'candidate-pair' && value.state === 'succeeded' && (value.selected || value.nominated)) pair = value; if (value.type === 'inbound-rtp' && value.kind === 'video') inbound = value; });
+        const stats = await pc.getStats(); let pair: Record<string, any> | undefined; let inbound: Record<string, any> | undefined; let outbound: Record<string, any> | undefined; const byId = new Map<string, Record<string, any>>();
+        stats.forEach(report => { const value = report as unknown as Record<string, any>; byId.set(String(value.id), value); if (value.type === 'candidate-pair' && value.state === 'succeeded' && (value.selected || value.nominated)) pair = value; if (value.type === 'inbound-rtp' && value.kind === 'video') inbound = value; if (value.type === 'outbound-rtp' && value.kind === 'video') outbound = value; });
         let route: Telemetry['route'] = 'checking'; let rttMs: number | undefined;
         if (pair) { const local = byId.get(pair.localCandidateId); const peer = byId.get(pair.remoteCandidateId); route = local?.candidateType === 'relay' || peer?.candidateType === 'relay' ? 'relay' : 'direct'; rttMs = Number.isFinite(pair.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : undefined; }
         const lost = inbound?.packetsLost ?? 0; const received = inbound?.packetsReceived ?? 0; const loss = lost + received > 0 ? lost / (lost + received) : 0;
         const quality: Telemetry['quality'] = (rttMs ?? 0) > 180 || loss > .04 ? '较差' : (rttMs ?? 0) > 80 || loss > .015 ? '良好' : '优秀';
-        setTelemetry({ route, quality, rttMs, loss });
+        const encoder = typeof outbound?.encoderImplementation === 'string' ? outbound.encoderImplementation : undefined;
+        const hardwareEncoder = typeof outbound?.powerEfficientEncoder === 'boolean' ? outbound.powerEfficientEncoder : undefined;
+        setTelemetry({ route, quality, rttMs, loss, encoder, hardwareEncoder });
+        if (role === 'controlled' && encoder && encoder !== lastEncoder) { lastEncoder = encoder; report('video-encoder', `${encoder}; powerEfficient=${String(hardwareEncoder)}`); }
         if (role === 'controlled') for (const sender of pc.getSenders()) if (sender.track?.kind === 'video') {
           const parameters = sender.getParameters(); if (parameters.encodings?.length) { parameters.encodings[0].maxBitrate = route === 'direct' ? 28_000_000 : 16_000_000; await sender.setParameters(parameters).catch(() => {}); }
         }

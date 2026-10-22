@@ -31,3 +31,5 @@
 - 已接入 Chromium 屏幕视频、Windows loopback 系统声音、ICE 直连优先/TURN 回退、selected candidate pair 路径识别、RTT/丢包质量和按路径调整发送码率。屏幕捕获请求只允许来自已经接受会话的被控端状态窗口。
 - 控制数据通道已接入独立的 Windows `SendInput` 辅助进程；只接受白名单键盘、受限鼠标事件，并在撤权、失焦、断开和退出时释放按键。
 - 当前画面与绝对坐标明确绑定主显示器；多显示器切换留作后续扩展。
+- ICE 同时收集直连与 TURN UDP/TCP 候选；直连优先，但中继连通性检查不会等待会话超时才开始。整体协商失败清理保持 30 秒。
+- Windows 优先高性能独显与 Chromium H.264 VideoEncodeAccelerator（NVIDIA 设备通常对应 NVENC），硬件不可用时保留软件回退；实际 GPU/video_encode 状态由诊断测试核验。
