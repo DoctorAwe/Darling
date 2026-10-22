@@ -10,6 +10,7 @@ import { CallPanel } from './CallPanel';
 import { Icon } from './Icon';
 import { RemoteDesktopSurface } from './RemoteDesktopSurface';
 import { AttachmentMessage } from './AttachmentMessage';
+import { ScreenshotSurface } from './ScreenshotSurface';
 declare global { interface Window { darling: DesktopApi } }
 const avatars = { dva: dvaAvatar, mercy: mercyAvatar };
 const names = { dva: 'D.Va', mercy: 'Mercy' };
@@ -33,6 +34,7 @@ function App() {
   const [attachmentMenu, setAttachmentMenu] = useState(false);
   const [attachments, setAttachments] = useState<Array<{ token: string; name: string; mime: string; size: number; image: boolean }>>([]);
   const [sending, setSending] = useState(false);
+  const attachmentTrigger = useRef<HTMLDivElement>(null);
   const callAction = (action: 'invite' | 'accept' | 'end') => {
     void window.darling.callAction(action, state.call?.callId).then(result => { if (!result.ok) setError(result.error ?? '通话操作失败'); else setError(''); }).catch(() => setError('无法操作通话，请重新连接'));
   };
@@ -48,6 +50,14 @@ function App() {
     return off;
   }, []);
   useEffect(() => bottom.current?.scrollIntoView({ behavior: 'smooth' }), [state.messages.length, state.pending.length]);
+  useEffect(() => {
+    if (!attachmentMenu) return;
+    const outside = (event: PointerEvent) => { if (!attachmentTrigger.current?.contains(event.target as Node)) setAttachmentMenu(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setAttachmentMenu(false); };
+    const blur = () => setAttachmentMenu(false);
+    document.addEventListener('pointerdown', outside); window.addEventListener('keydown', escape); window.addEventListener('blur', blur);
+    return () => { document.removeEventListener('pointerdown', outside); window.removeEventListener('keydown', escape); window.removeEventListener('blur', blur); };
+  }, [attachmentMenu]);
   const self = state.user ?? 'dva'; const peer = otherUser(self);
   const online = state.online.includes(peer);
   const send = async () => {
@@ -67,7 +77,7 @@ function App() {
   });
   const removeAttachment = (token: string) => { setAttachments(current => current.filter(value => value.token !== token)); void window.darling.attachmentDiscard(token); };
   const pickAttachments = () => { setAttachmentMenu(false); void window.darling.attachmentPick().then(appendAttachments).catch(() => setError('无法选择文件')); };
-  const takeScreenshot = () => { setAttachmentMenu(false); void window.darling.attachmentScreenshot().then(item => appendAttachments([item])).catch(() => setError('截图失败')); };
+  const takeScreenshot = () => { setAttachmentMenu(false); void window.darling.attachmentScreenshot().then(item => { if (item) appendAttachments([item]); }).catch(() => setError('截图失败')); };
   return <div className="shell">
     <header className="titlebar"><div className="brand"><span className="brand-mark"/> Darling</div><div className="window-buttons"><button aria-label="最小化" onClick={() => window.darling.window('minimize')}>−</button><button aria-label="最大化或还原" onClick={() => window.darling.window('maximize')}>□</button><button aria-label="关闭" onClick={() => window.darling.window('close')}>×</button></div></header>
     <div className="body"><aside><nav className="module-nav" aria-label="功能"><button className="module-active" aria-current="page"><Icon name="chat"/>消息</button></nav><div className="section-label">联系人</div><div className="contact selected"><Avatar user={peer}/><div><strong>{names[peer]}</strong><p><i className={online ? 'dot online' : 'dot'}/>{online ? '在线' : '当前离线'}</p></div></div>
@@ -83,8 +93,8 @@ function App() {
     <div className="workspace" data-module="chat"><div className="messages" aria-live="polite">{state.messages.length === 0 && state.pending.length === 0 && <div className="empty"><Avatar user={peer}/><h2>{names[peer]}</h2><p>发一条消息，开始聊天</p></div>}
     {state.messages.map(m => <article className={`message ${m.sender === self ? 'mine' : ''}`} key={m.id}><Avatar user={m.sender} small/><div className="message-content"><div className="message-meta">{names[m.sender]}<time>{new Date(m.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></div>{m.attachment ? <AttachmentMessage attachment={m.attachment}/> : <div className="bubble">{m.text}</div>}</div></article>)}
     {state.pending.map(m => <article className="message mine" key={m.clientId}><Avatar user={self} small/><div className="message-content"><div className="bubble pending">{m.text}</div><div className="delivery">{state.status === 'online' ? '发送中…' : '等待重连'}</div></div></article>)}<div ref={bottom}/></div></div>
-    <div className="composer">{attachments.length > 0 && <div className="pending-attachments">{attachments.map(item => <div key={item.token}><span className="file-type small">{item.image ? 'IMG' : (item.name.split('.').pop()?.slice(0, 4).toUpperCase() || 'FILE')}</span><span>{item.name}</span><button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.token)}>×</button></div>)}</div>}<div className="compose-box"><div className="attachment-trigger"><button className="plus" aria-label="添加附件" aria-expanded={attachmentMenu} onClick={() => setAttachmentMenu(value => !value)}><Icon name="plus"/></button>{attachmentMenu && <div className="attachment-menu"><button onClick={pickAttachments}><Icon name="file"/><span><strong>上传文件</strong><small>图片或其他文件</small></span></button><button onClick={takeScreenshot}><Icon name="camera"/><span><strong>截图</strong><small>截取主显示器</small></span></button></div>}</div><textarea aria-label="聊天消息" placeholder={`发送消息给 ${names[peer]}…`} value={draft} maxLength={8000} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><button className="send" disabled={(!draft.trim() && attachments.length === 0) || sending || !state.user || ['error', 'replaced'].includes(state.status)} onClick={() => void send()} aria-label="发送"><Icon name="send"/></button></div><div className="compose-footer"><span>{error || (sending ? '正在发送…' : 'Enter 发送 · Shift + Enter 换行')}</span></div></div></main></div>
+    <div className="composer">{attachments.length > 0 && <div className="pending-attachments">{attachments.map(item => <div key={item.token}><span className="file-type small">{item.image ? 'IMG' : (item.name.split('.').pop()?.slice(0, 4).toUpperCase() || 'FILE')}</span><span>{item.name}</span><button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.token)}>×</button></div>)}</div>}<div className="compose-box"><div className="attachment-trigger" ref={attachmentTrigger}><button className="plus" aria-label="添加附件" aria-expanded={attachmentMenu} onClick={() => setAttachmentMenu(value => !value)}><Icon name="plus"/></button>{attachmentMenu && <div className="attachment-menu"><button onClick={pickAttachments}><Icon name="file"/><span><strong>上传文件</strong><small>图片或其他文件</small></span></button><button onClick={takeScreenshot}><Icon name="camera"/><span><strong>截图</strong><small>框选主显示器区域</small></span></button></div>}</div><textarea aria-label="聊天消息" placeholder={`发送消息给 ${names[peer]}…`} value={draft} maxLength={8000} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><button className="send" disabled={(!draft.trim() && attachments.length === 0) || sending || !state.user || ['error', 'replaced'].includes(state.status)} onClick={() => void send()} aria-label="发送"><Icon name="send"/></button></div><div className="compose-footer"><span>{error || (sending ? '正在发送…' : 'Enter 发送 · Shift + Enter 换行')}</span></div></div></main></div>
   </div>;
 }
 const surface = new URLSearchParams(location.search).get('surface');
-createRoot(document.getElementById('root')!).render(surface === 'remote-control' || surface === 'remote-status' ? <RemoteSurface surface={surface}/> : <App/>);
+createRoot(document.getElementById('root')!).render(surface === 'screenshot' ? <ScreenshotSurface/> : surface === 'remote-control' || surface === 'remote-status' ? <RemoteSurface surface={surface}/> : <App/>);

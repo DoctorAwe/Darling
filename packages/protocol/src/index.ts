@@ -118,7 +118,10 @@ export interface DesktopApi {
   subscribe(listener: (snapshot: Snapshot) => void): () => void;
   send(text: string): Promise<{ ok: boolean; error?: string }>;
   attachmentPick(): Promise<Array<{ token: string; name: string; mime: string; size: number; image: boolean }>>;
-  attachmentScreenshot(): Promise<{ token: string; name: string; mime: string; size: number; image: boolean }>;
+  attachmentScreenshot(): Promise<{ token: string; name: string; mime: string; size: number; image: boolean } | null>;
+  subscribeScreenshot(listener: (dataUrl: string) => void): () => void;
+  screenshotReady(): void;
+  screenshotComplete(selection?: { x: number; y: number; width: number; height: number }): void;
   attachmentDiscard(token: string): Promise<void>;
   attachmentSend(token: string): Promise<{ ok: boolean; error?: string }>;
   attachmentRead(id: string): Promise<{ data: ArrayBuffer; mime: string }>;

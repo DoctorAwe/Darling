@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session as electronSession, webContents } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session as electronSession, webContents, type NativeImage } from 'electron';
 import { basename, extname, join, resolve } from 'node:path';
 import { release } from 'node:os';
 import { Session } from './session';
@@ -29,6 +29,7 @@ let remoteInput: RemoteInputHost;
 const remoteInputGate = new RemoteInputGate();
 type PendingAttachment = { token: string; name: string; mime: string; size: number; image: boolean; path?: string; data?: Buffer; clientId: string };
 const pendingAttachments = new Map<string, PendingAttachment>();
+let screenshotCapture: { window: BrowserWindow; image: NativeImage; resolve: (value: Omit<PendingAttachment, 'path' | 'data' | 'clientId'> | null) => void } | undefined;
 const mimeFor = (name: string) => ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.txt': 'text/plain', '.pdf': 'application/pdf', '.zip': 'application/zip' } as Record<string, string>)[extname(name).toLowerCase()] ?? 'application/octet-stream';
 const pendingRemoteSignals: Array<ReturnType<typeof RemoteSignal.parse>> = [];
 let media: MediaHost;
@@ -111,12 +112,49 @@ void app.whenReady().then(() => {
     }
     return selected.map(({ token, name, mime, size, image }) => ({ token, name, mime, size, image }));
   });
+  const finishScreenshot = (selection?: { x: number; y: number; width: number; height: number }) => {
+    const current = screenshotCapture; if (!current) return;
+    screenshotCapture = undefined;
+    let result: Omit<PendingAttachment, 'path' | 'data' | 'clientId'> | null = null;
+    if (selection && [selection.x, selection.y, selection.width, selection.height].every(Number.isFinite) && selection.width >= 4 && selection.height >= 4) {
+      const imageSize = current.image.getSize(), bounds = current.window.getContentBounds();
+      const x = Math.max(0, Math.min(imageSize.width - 1, Math.round(selection.x * imageSize.width / bounds.width)));
+      const y = Math.max(0, Math.min(imageSize.height - 1, Math.round(selection.y * imageSize.height / bounds.height)));
+      const width = Math.max(1, Math.min(imageSize.width - x, Math.round(selection.width * imageSize.width / bounds.width)));
+      const height = Math.max(1, Math.min(imageSize.height - y, Math.round(selection.height * imageSize.height / bounds.height)));
+      const data = current.image.crop({ x, y, width, height }).toPNG(); const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+      const item: PendingAttachment = { token: randomUUID(), clientId: randomUUID(), name: `截图-${stamp}.png`, mime: 'image/png', size: data.length, image: true, data };
+      pendingAttachments.set(item.token, item); result = { token: item.token, name: item.name, mime: item.mime, size: item.size, image: true };
+    }
+    if (!current.window.isDestroyed()) current.window.destroy();
+    if (!window.isDestroyed()) { window.show(); window.focus(); }
+    current.resolve(result);
+  };
+  ipcMain.on('screenshot:ready', event => {
+    const current = screenshotCapture;
+    if (current && !current.window.isDestroyed() && event.sender.id === current.window.webContents.id) {
+      event.sender.send('screenshot:image', current.image.toDataURL()); current.window.show(); current.window.focus();
+    }
+  });
+  ipcMain.on('screenshot:complete', (event, value: unknown) => {
+    const current = screenshotCapture; if (!current || event.sender.id !== current.window.webContents.id) return;
+    const selection = value && typeof value === 'object' ? value as { x: number; y: number; width: number; height: number } : undefined;
+    finishScreenshot(selection);
+  });
   ipcMain.handle('attachment:screenshot', async () => {
-    const display = screen.getPrimaryDisplay(); const width = Math.max(1, Math.round(display.size.width * display.scaleFactor)), height = Math.max(1, Math.round(display.size.height * display.scaleFactor));
-    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width, height }, fetchWindowIcons: false });
-    const source = sources.find(value => value.display_id === String(display.id)) ?? sources[0]; if (!source || source.thumbnail.isEmpty()) throw new Error('无法截取主显示器');
-    const data = source.thumbnail.toPNG(); const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19); const item: PendingAttachment = { token: randomUUID(), clientId: randomUUID(), name: `截图-${stamp}.png`, mime: 'image/png', size: data.length, image: true, data };
-    pendingAttachments.set(item.token, item); return { token: item.token, name: item.name, mime: item.mime, size: item.size, image: true };
+    if (screenshotCapture) return null;
+    window.hide(); await new Promise(resolve => setTimeout(resolve, 180));
+    try {
+      const display = screen.getPrimaryDisplay(); const width = Math.max(1, Math.round(display.size.width * display.scaleFactor)), height = Math.max(1, Math.round(display.size.height * display.scaleFactor));
+      const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width, height }, fetchWindowIcons: false });
+      const source = sources.find(value => value.display_id === String(display.id)) ?? sources[0]; if (!source || source.thumbnail.isEmpty()) throw new Error('无法截取主显示器');
+      const overlay = new BrowserWindow({ ...display.bounds, frame: false, show: false, resizable: false, movable: false, skipTaskbar: true, alwaysOnTop: true, backgroundColor: '#000000', webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+      overlay.setMenu(null); overlay.setAlwaysOnTop(true, 'screen-saver');
+      const result = new Promise<Omit<PendingAttachment, 'path' | 'data' | 'clientId'> | null>(resolve => { screenshotCapture = { window: overlay, image: source.thumbnail, resolve }; });
+      overlay.on('closed', () => { if (screenshotCapture?.window === overlay) finishScreenshot(); });
+      void overlay.loadFile(join(__dirname, 'renderer/index.html'), { query: { surface: 'screenshot' } }).catch(() => finishScreenshot());
+      return await result;
+    } catch (error) { if (!window.isDestroyed()) { window.show(); window.focus(); } throw error; }
   });
   ipcMain.handle('attachment:discard', (_event, token: unknown) => { if (typeof token === 'string') pendingAttachments.delete(token); });
   ipcMain.handle('attachment:send', async (_event, token: unknown) => {

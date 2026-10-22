@@ -17,6 +17,11 @@ app.on('web-contents-created', (_event, contents) => {
   contents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message); });
   contents.once('did-finish-load', async () => {
     try {
+      if (new URL(contents.getURL()).searchParams.get('surface') === 'screenshot') {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        await contents.executeJavaScript(`window.darling.screenshotComplete({ x: 10, y: 10, width: 64, height: 48 })`);
+        return;
+      }
       await new Promise(resolve => setTimeout(resolve, 300));
       const actualWindow = BrowserWindow.fromWebContents(contents);
       if (visibleCheck && (!actualWindow || !actualWindow.isVisible() || actualWindow.isMinimized())) throw new Error('Loaded application window is not visible');
@@ -25,6 +30,19 @@ app.on('web-contents-created', (_event, contents) => {
       await contents.executeJavaScript(`document.querySelector('button[aria-label="添加附件"]').click()`);
       const attachmentMenu = await contents.executeJavaScript(`document.body.innerText`);
       if (!attachmentMenu.includes('上传文件') || !attachmentMenu.includes('截图')) throw new Error('Attachment menu failed');
+      await contents.executeJavaScript(`document.querySelector('h1').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (await contents.executeJavaScript(`document.body.innerText.includes('上传文件')`)) throw new Error('Attachment menu did not close on outside click');
+      await contents.executeJavaScript(`document.querySelector('button[aria-label="添加附件"]').click()`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await contents.executeJavaScript(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (await contents.executeJavaScript(`document.body.innerText.includes('上传文件')`)) throw new Error('Attachment menu did not close on Escape');
+      const blobImage = await contents.executeJavaScript(`new Promise(resolve => { const image = new Image(); const url = URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>'], { type: 'image/svg+xml' })); image.onload = () => { URL.revokeObjectURL(url); resolve(true); }; image.onerror = () => { URL.revokeObjectURL(url); resolve(false); }; image.src = url; document.body.appendChild(image); })`);
+      if (!blobImage) throw new Error('Blob attachment preview is blocked by page policy');
+      const selectedScreenshot = await contents.executeJavaScript(`window.darling.attachmentScreenshot()`);
+      if (!selectedScreenshot?.image || selectedScreenshot.mime !== 'image/png' || selectedScreenshot.size <= 0) throw new Error('Screenshot selection did not create a cropped PNG');
+      await contents.executeJavaScript(`window.darling.attachmentDiscard(${JSON.stringify(selectedScreenshot.token)})`);
       await contents.executeJavaScript(`document.querySelector('button[aria-label="设置"]').click()`);
       await new Promise(resolve => setTimeout(resolve, 100));
       await contents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === '音频诊断').click()`);

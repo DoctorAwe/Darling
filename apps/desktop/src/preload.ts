@@ -24,6 +24,13 @@ const api: DesktopApi = {
   send: text => ipcRenderer.invoke('session:send', text),
   attachmentPick: () => ipcRenderer.invoke('attachment:pick'),
   attachmentScreenshot: () => ipcRenderer.invoke('attachment:screenshot'),
+  subscribeScreenshot: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, dataUrl: string) => listener(dataUrl);
+    ipcRenderer.on('screenshot:image', handler);
+    return () => ipcRenderer.removeListener('screenshot:image', handler);
+  },
+  screenshotReady: () => ipcRenderer.send('screenshot:ready'),
+  screenshotComplete: selection => ipcRenderer.send('screenshot:complete', selection),
   attachmentDiscard: token => ipcRenderer.invoke('attachment:discard', token),
   attachmentSend: token => ipcRenderer.invoke('attachment:send', token),
   attachmentRead: id => ipcRenderer.invoke('attachment:read', id),
