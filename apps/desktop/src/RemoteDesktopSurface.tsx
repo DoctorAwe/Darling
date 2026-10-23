@@ -33,7 +33,9 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
         }
         await pc.setRemoteDescription({ type: value.kind, sdp: value.sdp });
         if (value.kind === 'offer') {
-          const videoConstraints = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 60, max: 60 } };
+          // The controller renders its own zero-latency system cursor. Excluding
+          // the controlled cursor from capture avoids a delayed duplicate.
+          const videoConstraints = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 60, max: 60 }, cursor: 'never' as const };
           let capture: MediaStream;
           try { capture = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: remote.permissions.audio }); }
           catch (error) {
