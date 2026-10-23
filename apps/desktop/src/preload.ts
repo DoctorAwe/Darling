@@ -16,6 +16,7 @@ const api: DesktopApi = {
   snapshot: () => ipcRenderer.invoke('session:snapshot'),
   send: text => ipcRenderer.invoke('session:send', text),
   groupSend: text => ipcRenderer.invoke('group:send', text),
+  groupAiCancel: requestId => ipcRenderer.invoke('group:ai-cancel', requestId),
   attachmentPick: () => ipcRenderer.invoke('attachment:pick'),
   attachmentScreenshot: () => ipcRenderer.invoke('attachment:screenshot'),
   subscribeScreenshot: listener => {

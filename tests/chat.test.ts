@@ -10,6 +10,7 @@ import { createServer } from '../apps/server/src/app';
 import { MessageStore } from '../apps/server/src/store';
 import { Session } from '../apps/desktop/src/session';
 import type { ServerPacket, User } from '../packages/protocol/src/index';
+import type { AiClient, AiInputMessage } from '../apps/server/src/ai/deepseek-client';
 
 async function client(url: string) {
   const socket = new WebSocket(url);
@@ -124,6 +125,52 @@ test('AI group text chat is durable, deduplicated and isolated from direct messa
     await mercy.wait('message.stored', mercy.send('message.send', { clientId: randomUUID(), text: '私聊仍独立' }));
     const unchanged = await dva.wait('group.message.page', dva.send('group.sync', { groupId: 'dva-mercy-echo', after: 0 }));
     assert.equal(unchanged.payload.messages.length, 1);
+  } finally { await app.close(); }
+});
+
+test('Echo streams replies, distinguishes both users and persists only the completed answer', async () => {
+  const calls: AiInputMessage[][] = [];
+  const fake: AiClient = { model: 'test-echo', async *stream(messages) { calls.push(messages); yield '收到，'; yield '两位。'; } };
+  const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' }, aiClient: fake });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const url = `ws://127.0.0.1:${(app.server.address() as { port: number }).port}/ws`;
+  try {
+    const dva = await client(url); const mercy = await client(url); await dva.login('dva'); await mercy.login('mercy');
+    assert.equal((await dva.wait('group.ai.capability')).payload.available, true);
+    await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: 'D.Va 的普通意见' }));
+    await mercy.wait('group.message.stored', mercy.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: 'Mercy 的普通意见' }));
+    const triggerId = mercy.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: '@Echo 请区分我们' });
+    await mercy.wait('group.message.stored', triggerId);
+    const started = await mercy.wait('group.ai.started');
+    assert.match((await mercy.wait('group.ai.delta')).payload.delta, /收到/);
+    assert.match((await mercy.wait('group.ai.delta')).payload.delta, /两位/);
+    const completed = await mercy.wait('group.ai.completed');
+    assert.equal(completed.payload.requestId, started.payload.requestId);
+    assert.equal(completed.payload.message.sender, 'echo'); assert.equal(completed.payload.message.text, '收到，两位。');
+    assert.equal(calls.length, 1);
+    const users = calls[0].filter(message => message.role === 'user');
+    assert.deepEqual(users.map(message => message.name), ['dva', 'mercy', 'mercy']);
+    const page = await dva.wait('group.message.page', dva.send('group.sync', { groupId: 'dva-mercy-echo', after: 0 }));
+    assert.equal(page.payload.messages.length, 4); assert.equal(page.payload.messages.at(-1).sender, 'echo');
+  } finally { await app.close(); }
+});
+
+test('stopping Echo aborts generation and never persists a partial answer', async () => {
+  const fake: AiClient = { model: 'test-echo', async *stream(_messages, signal) {
+    yield '不会落库的半截';
+    await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => { const error = new Error('aborted'); error.name = 'AbortError'; reject(error); }, { once: true }));
+  } };
+  const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' }, aiClient: fake });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const url = `ws://127.0.0.1:${(app.server.address() as { port: number }).port}/ws`;
+  try {
+    const dva = await client(url); await dva.login('dva');
+    await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: '@Echo 停止测试' }));
+    const started = await dva.wait('group.ai.started'); await dva.wait('group.ai.delta');
+    dva.send('group.ai.cancel', { groupId: 'dva-mercy-echo', aiRequestId: started.payload.requestId });
+    assert.equal((await dva.wait('group.ai.failed')).payload.error, '已停止生成');
+    const page = await dva.wait('group.message.page', dva.send('group.sync', { groupId: 'dva-mercy-echo', after: 0 }));
+    assert.equal(page.payload.messages.length, 1); assert.equal(page.payload.messages[0].sender, 'dva');
   } finally { await app.close(); }
 });
 

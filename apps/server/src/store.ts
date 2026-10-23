@@ -26,8 +26,11 @@ export class MessageStore {
       INSERT OR IGNORE INTO group_members VALUES('dva-mercy-echo','dva','human','D.Va');
       INSERT OR IGNORE INTO group_members VALUES('dva-mercy-echo','mercy','human','Mercy');
       INSERT OR IGNORE INTO group_members VALUES('dva-mercy-echo','echo','assistant','Echo');
-      CREATE TABLE IF NOT EXISTS group_messages(id TEXT PRIMARY KEY,groupId TEXT NOT NULL,clientId TEXT NOT NULL,sender TEXT NOT NULL,messageType TEXT NOT NULL,text TEXT NOT NULL,seq INTEGER NOT NULL,createdAt TEXT NOT NULL,UNIQUE(groupId,seq),UNIQUE(groupId,sender,clientId));
+      CREATE TABLE IF NOT EXISTS group_messages(id TEXT PRIMARY KEY,groupId TEXT NOT NULL,clientId TEXT NOT NULL,sender TEXT NOT NULL,messageType TEXT NOT NULL,text TEXT NOT NULL,seq INTEGER NOT NULL,createdAt TEXT NOT NULL,aiRequestId TEXT,aiModel TEXT,UNIQUE(groupId,seq),UNIQUE(groupId,sender,clientId));
       INSERT OR IGNORE INTO schema_migrations VALUES(3);`);
+    const groupColumns = this.db.prepare('PRAGMA table_info(group_messages)').all() as Array<{ name: string }>;
+    if (!groupColumns.some(column => column.name === 'aiRequestId')) this.db.exec('ALTER TABLE group_messages ADD COLUMN aiRequestId TEXT');
+    if (!groupColumns.some(column => column.name === 'aiModel')) this.db.exec('ALTER TABLE group_messages ADD COLUMN aiModel TEXT');
   }
   private row(value: Record<string, unknown>): Message {
     const attachment = value.attachmentId ? { id: value.attachmentId, name: value.attachmentName, mime: value.attachmentMime, size: value.attachmentSize } as Attachment : undefined;
@@ -81,6 +84,18 @@ export class MessageStore {
     const rows = this.db.prepare('SELECT id,groupId,clientId,sender,messageType,text,seq,createdAt FROM group_messages WHERE groupId=? AND seq>? ORDER BY seq LIMIT 101').all(groupId, after) as GroupMessage[];
     const messages = rows.slice(0, 100);
     return { groupId, messages, hasMore: rows.length > 100, next: messages.at(-1)?.seq ?? after };
+  }
+  groupRecent(groupId: AiGroupId, throughSeq: number, limit: number) {
+    return (this.db.prepare('SELECT id,groupId,clientId,sender,messageType,text,seq,createdAt FROM group_messages WHERE groupId=? AND seq<=? ORDER BY seq DESC LIMIT ?').all(groupId, throughSeq, limit) as GroupMessage[]).reverse();
+  }
+  saveAssistant(groupId: AiGroupId, requestId: string, text: string, model: string): GroupMessage {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const { next_seq } = this.db.prepare('SELECT next_seq FROM groups WHERE id=?').get(groupId) as { next_seq: number };
+      const message: GroupMessage = { id: randomUUID(), groupId, clientId: requestId, sender: 'echo', messageType: 'assistant', text, seq: next_seq, createdAt: new Date().toISOString() };
+      this.db.prepare('INSERT INTO group_messages(id,groupId,clientId,sender,messageType,text,seq,createdAt,aiRequestId,aiModel) VALUES(?,?,?,?,?,?,?,?,?,?)').run(message.id, groupId, requestId, 'echo', 'assistant', text, next_seq, message.createdAt, requestId, model);
+      this.db.prepare('UPDATE groups SET next_seq=next_seq+1 WHERE id=?').run(groupId); this.db.exec('COMMIT'); return message;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   close() { this.db.close(); }
 }

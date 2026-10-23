@@ -142,6 +142,7 @@ void app.whenReady().then(() => {
   });
   ipcMain.handle('session:send', (_event, text: unknown) => typeof text === 'string' ? session.send(text) : { ok: false, error: '无效消息' });
   ipcMain.handle('group:send', (_event, text: unknown) => typeof text === 'string' ? session.groupSend(text) : { ok: false, error: '无效消息' });
+  ipcMain.handle('group:ai-cancel', (_event, requestId: unknown) => session.groupAiCancel(requestId));
   ipcMain.handle('attachment:pick', async () => {
     const result = await dialog.showOpenDialog(window, { title: '选择要发送的文件', properties: ['openFile', 'multiSelections'] }); if (result.canceled) return [];
     const selected: PendingAttachment[] = [];

@@ -12,8 +12,10 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { Attachment } from '../../../packages/protocol/src/index';
+import type { AiClient } from './ai/deepseek-client';
+import { AiOrchestrator } from './ai/orchestrator';
 
-export async function createServer(options: { database: string; users: Record<User, string>; turn?: TurnConfig; attachmentsDir?: string }) {
+export async function createServer(options: { database: string; users: Record<User, string>; turn?: TurnConfig; attachmentsDir?: string; aiClient?: AiClient; aiTimeoutMs?: number }) {
   const turn = options.turn === undefined ? undefined : TurnConfig.parse(options.turn);
   const app = Fastify({ logger: false });
   const store = new MessageStore(options.database);
@@ -34,6 +36,13 @@ export async function createServer(options: { database: string; users: Record<Us
   const publishMessage = (message: ReturnType<MessageStore['page']>['messages'][number]) => {
     for (const socket of sessions.values()) send(socket, { version: 1, type: 'message.stored', payload: message });
   };
+  const ai = new AiOrchestrator(store, options.aiClient, event => {
+    const packet: ServerPacket = event.type === 'started' ? { version: 1, type: 'group.ai.started', payload: event }
+      : event.type === 'delta' ? { version: 1, type: 'group.ai.delta', payload: event }
+      : event.type === 'completed' ? { version: 1, type: 'group.ai.completed', payload: event }
+      : { version: 1, type: 'group.ai.failed', payload: event };
+    for (const socket of sessions.values()) send(socket, packet);
+  }, options.aiTimeoutMs);
   const httpUser = (headers: Record<string, string | string[] | undefined>) => {
     const parsed = User.safeParse(headers['x-darling-user']); const password = headers['x-darling-password'];
     return parsed.success && typeof password === 'string' && options.users[parsed.data] === password && sessions.has(parsed.data) ? parsed.data : undefined;
@@ -101,9 +110,14 @@ export async function createServer(options: { database: string; users: Record<Us
           previous.close(4001, 'Session replaced');
         }
         send(socket, { version: 1, type: 'auth.ok', requestId: packet.requestId, payload: { user, ice: issueIce(turn, user) } });
+        send(socket, { version: 1, type: 'group.ai.capability', payload: { groupId: 'dva-mercy-echo', available: ai.available, assistantId: 'echo', displayName: 'Echo' } });
         presence(); return;
       }
       if (!user || sessions.get(user) !== socket) return fail('NOT_AUTHENTICATED', '需要重新登录');
+      if (packet.type === 'group.ai.cancel') {
+        if (!ai.cancel(packet.payload.aiRequestId)) fail('AI_REQUEST_NOT_ACTIVE', 'Echo 当前没有可停止的回答');
+        return;
+      }
       if (packet.type === 'rtc.config') {
         send(socket, { version: 1, type: 'rtc.config', requestId: packet.requestId, payload: issueIce(turn, user) }); return;
       }
@@ -163,6 +177,7 @@ export async function createServer(options: { database: string; users: Record<Us
           const result = store.saveGroup(packet.payload.groupId, user, packet.payload.clientId, packet.payload.text);
           send(socket, { version: 1, type: 'group.message.stored', requestId: packet.requestId, payload: result.message });
           if (result.inserted) for (const peer of sessions.values()) if (peer !== socket) send(peer, { version: 1, type: 'group.message.stored', payload: result.message });
+          if (result.inserted) ai.enqueue(result.message);
         }
       } catch { fail('STORAGE_ERROR', '消息暂未保存，请稍后重试'); }
     });

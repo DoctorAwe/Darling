@@ -92,7 +92,7 @@ export class Session extends EventEmitter {
   }
   start() {
     this.stop(); this.stopped = false; this.attempts = 0; this.cursor = 0; this.groupCursor = 0;
-    this.state.messages = []; this.state.pending = []; this.state.groupMessages = []; this.state.online = []; this.state.user = undefined;
+    this.state.messages = []; this.state.pending = []; this.state.groupMessages = []; this.state.groupAi = undefined; this.state.online = []; this.state.user = undefined;
     try {
       this.config = ClientConfig.parse(JSON.parse(readFileSync(this.state.configPath, 'utf8')));
       this.state.user = this.config.auth.username;
@@ -190,6 +190,18 @@ export class Session extends EventEmitter {
         for (const message of packet.payload.messages) this.mergeGroup(message);
         this.groupCursor = packet.payload.next;
         if (packet.payload.hasMore) this.requestGroupSync();
+      } else if (packet.type === 'group.ai.capability') {
+        this.state.groupAi = { available: packet.payload.available };
+      } else if (packet.type === 'group.ai.started') {
+        this.state.groupAi = { available: true, requestId: packet.payload.requestId, status: 'streaming', text: '' };
+      } else if (packet.type === 'group.ai.delta') {
+        if (this.state.groupAi?.requestId !== packet.payload.requestId || this.state.groupAi.status !== 'streaming') return;
+        this.state.groupAi.text = (this.state.groupAi.text ?? '') + packet.payload.delta;
+      } else if (packet.type === 'group.ai.completed') {
+        this.mergeGroup(packet.payload.message);
+        if (this.state.groupAi?.requestId === packet.payload.requestId) this.state.groupAi = { available: true };
+      } else if (packet.type === 'group.ai.failed') {
+        this.state.groupAi = { available: this.state.groupAi?.available ?? false, requestId: packet.payload.requestId, status: 'failed', error: packet.payload.error };
       } else if (packet.type === 'error') {
         if (packet.requestId && this.rtc.reject(packet.requestId, packet.payload.message)) return;
         if (packet.requestId && packet.requestId === this.remoteRequest?.id) {
@@ -324,6 +336,11 @@ export class Session extends EventEmitter {
     if (!parsed.success) return { ok: false, error: '消息不能为空，最多 8000 字符' };
     if (!this.state.user || this.stopped || this.state.status !== 'online' || this.socket?.readyState !== WebSocket.OPEN) return { ok: false, error: '请先连接服务器' };
     this.transmit({ version: 1, type: 'group.message.send', requestId: randomUUID(), payload: { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: parsed.data } });
+    return { ok: true };
+  }
+  groupAiCancel(requestId: unknown): { ok: boolean; error?: string } {
+    if (typeof requestId !== 'string' || this.state.groupAi?.requestId !== requestId || this.state.groupAi.status !== 'streaming') return { ok: false, error: 'Echo 当前没有可停止的回答' };
+    this.transmit({ version: 1, type: 'group.ai.cancel', requestId: randomUUID(), payload: { groupId: 'dva-mercy-echo', aiRequestId: requestId } });
     return { ok: true };
   }
   private flush() {

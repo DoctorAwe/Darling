@@ -69,6 +69,7 @@ export const ClientPacket = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('message.sync'), payload: z.object({ after: z.number().int().min(0) }) }),
   z.object({ ...base, type: z.literal('group.message.send'), payload: z.object({ groupId: AiGroupId, clientId: z.string().uuid(), text: Text }) }),
   z.object({ ...base, type: z.literal('group.sync'), payload: z.object({ groupId: AiGroupId, after: z.number().int().min(0) }) }),
+  z.object({ ...base, type: z.literal('group.ai.cancel'), payload: z.object({ groupId: AiGroupId, aiRequestId: z.string().uuid() }) }),
 ]);
 export type ClientPacket = z.infer<typeof ClientPacket>;
 export const Attachment = z.object({ id: z.string().uuid(), name: z.string().min(1).max(255), mime: z.string().min(1).max(128), size: z.number().int().nonnegative().max(128 * 1024 * 1024) }).strict();
@@ -92,6 +93,11 @@ export const ServerPacket = z.discriminatedUnion('type', [
   z.object({ version: z.literal(1), type: z.literal('message.page'), requestId: z.string(), payload: z.object({ messages: z.array(Message), hasMore: z.boolean(), next: z.number().int() }) }),
   z.object({ version: z.literal(1), type: z.literal('group.message.stored'), requestId: z.string().optional(), payload: GroupMessage }),
   z.object({ version: z.literal(1), type: z.literal('group.message.page'), requestId: z.string(), payload: z.object({ groupId: AiGroupId, messages: z.array(GroupMessage), hasMore: z.boolean(), next: z.number().int() }) }),
+  z.object({ version: z.literal(1), type: z.literal('group.ai.capability'), payload: z.object({ groupId: AiGroupId, available: z.boolean(), assistantId: z.literal('echo'), displayName: z.literal('Echo') }) }),
+  z.object({ version: z.literal(1), type: z.literal('group.ai.started'), payload: z.object({ groupId: AiGroupId, requestId: z.string().uuid(), triggerMessageId: z.string().uuid() }) }),
+  z.object({ version: z.literal(1), type: z.literal('group.ai.delta'), payload: z.object({ groupId: AiGroupId, requestId: z.string().uuid(), delta: z.string().min(1).max(16000) }) }),
+  z.object({ version: z.literal(1), type: z.literal('group.ai.completed'), payload: z.object({ groupId: AiGroupId, requestId: z.string().uuid(), message: GroupMessage }) }),
+  z.object({ version: z.literal(1), type: z.literal('group.ai.failed'), payload: z.object({ groupId: AiGroupId, requestId: z.string().uuid(), error: z.string().min(1).max(256) }) }),
   z.object({ version: z.literal(1), type: z.literal('error'), requestId: z.string().optional(), payload: z.object({ code: z.string(), message: z.string() }) }),
 ]);
 export type ServerPacket = z.infer<typeof ServerPacket>;
@@ -112,6 +118,7 @@ export type Snapshot = {
   call?: CallState | null; callError?: string; callPending?: boolean;
   remote?: RemoteSessionState | null; remoteError?: string; remotePending?: boolean;
   remoteNative?: { connected: boolean; controlReady: boolean; videoWidth: number; videoHeight: number };
+  groupAi?: { available: boolean; requestId?: string; status?: 'streaming' | 'failed'; text?: string; error?: string };
 };
 export type RtcInputMetrics = {
   sampledAt: number; sentPackets: number | null; receivedPackets: number | null;
@@ -129,6 +136,7 @@ export interface DesktopApi {
   subscribe(listener: (snapshot: Snapshot) => void): () => void;
   send(text: string): Promise<{ ok: boolean; error?: string }>;
   groupSend(text: string): Promise<{ ok: boolean; error?: string }>;
+  groupAiCancel(requestId: string): Promise<{ ok: boolean; error?: string }>;
   attachmentPick(): Promise<Array<{ token: string; name: string; mime: string; size: number; image: boolean }>>;
   attachmentScreenshot(): Promise<{ token: string; name: string; mime: string; size: number; image: boolean } | null>;
   subscribeScreenshot(listener: (jpeg: Uint8Array) => void): () => void;
