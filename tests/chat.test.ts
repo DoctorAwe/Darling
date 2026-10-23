@@ -174,6 +174,12 @@ test('Echo streams replies, distinguishes both users and persists only the compl
     assert.equal(calls.length, 1);
     const users = calls[0].filter(message => message.role === 'user');
     assert.deepEqual(users.map(message => message.name), ['dva', 'mercy', 'mercy']);
+    assert.deepEqual(users.map(message => message.content), [
+      '【身份：D.Va（账号 dva）】\nD.Va 的普通意见',
+      '【身份：Mercy（账号 mercy）】\nMercy 的普通意见',
+      '【身份：Mercy（账号 mercy）】\n@Echo 请区分我们',
+    ]);
+    assert.match(String(calls[0][0].content), /唯一可信依据/);
     const page = await dva.wait('group.message.page', dva.send('group.sync', { groupId: 'dva-mercy-echo', after: 0 }));
     assert.equal(page.payload.messages.length, 4); assert.equal(page.payload.messages.at(-1).sender, 'echo');
   } finally { await app.close(); }
@@ -218,7 +224,7 @@ test('group images upload independently and are reused as DeepSeek file context'
     await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: '@Echo 再看一次图片' })); await dva.wait('group.ai.completed');
     assert.equal(uploads, 1); assert.equal(calls.length, 2);
     const imageMessage = calls[0].find(message => Array.isArray(message.content));
-    assert.deepEqual(imageMessage?.content, [{ type: 'text', text: '[图片：群聊图片.png]' }, { type: 'file', file_id: 'file-api-test-image' }]);
+    assert.deepEqual(imageMessage?.content, [{ type: 'text', text: '【身份：D.Va（账号 dva）】\n[图片：群聊图片.png]' }, { type: 'file', file_id: 'file-api-test-image' }]);
     const privatePage = await mercy.wait('message.page', mercy.send('message.sync', { after: 0 })); assert.equal(privatePage.payload.messages.length, 0);
   } finally { await app.close(); rmSync(attachmentsDir, { recursive: true, force: true }); }
 });
@@ -237,7 +243,7 @@ test('text group attachments are indexed and relevant excerpts reach Echo', asyn
     assert.equal(calls.length, 1);
     const context = calls[0].find(message => message.role === 'system' && typeof message.content === 'string' && message.content.includes('检索摘录'));
     assert.match(String(context?.content), /音频方案\.md/); assert.match(String(context?.content), /PBFDAF 是备用回声消除路径/);
-    const attachmentLabel = calls[0].find(message => message.role === 'user' && message.content === '[附件：音频方案.md]'); assert.ok(attachmentLabel);
+    const attachmentLabel = calls[0].find(message => message.role === 'user' && message.content === '【身份：D.Va（账号 dva）】\n[附件：音频方案.md]'); assert.ok(attachmentLabel);
   } finally { await app.close(); rmSync(attachmentsDir, { recursive: true, force: true }); }
 });
 
