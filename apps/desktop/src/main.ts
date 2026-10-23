@@ -265,9 +265,10 @@ void app.whenReady().then(() => {
   });
   const openRemoteSurface = (surface: 'remote-control' | 'remote-status') => {
     const controlled = surface === 'remote-status';
+    const controlledWidth = Math.min(1080, screen.getPrimaryDisplay().workArea.width);
     const remoteWindow = new BrowserWindow({
-      width: controlled ? 620 : 1280, height: controlled ? 78 : 800,
-      minWidth: controlled ? 620 : 900, minHeight: controlled ? 78 : 600,
+      width: controlled ? controlledWidth : 1280, height: controlled ? 78 : 800,
+      minWidth: controlled ? controlledWidth : 900, minHeight: controlled ? 78 : 600,
       frame: !controlled, resizable: !controlled, maximizable: !controlled,
       autoHideMenuBar: true,
       alwaysOnTop: controlled, skipTaskbar: controlled, backgroundColor: '#10131b',
