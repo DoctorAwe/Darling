@@ -389,14 +389,14 @@ test('desktop session automatically logs in and restores durable queued messages
     writeFileSync(join(dir, `outbox-${Buffer.from(url).toString('base64url')}-dva.json`), JSON.stringify([
       { clientId: queuedId, sender: 'dva', text: '离线待发', createdAt: new Date().toISOString() },
     ]));
-    session.start(); await until(() => session.state.status === 'online');
+    session.start(); await until(() => session.state.status === 'online' && session.state.historyReady?.direct === true && session.state.historyReady?.group === true);
     await until(() => session.state.messages.length === 1 && session.state.pending.length === 0);
     assert.equal(session.state.messages[0].clientId, queuedId);
     assert.equal(session.send('持久消息').ok, true);
     await until(() => session.state.messages.length === 2 && session.state.pending.length === 0);
     assert.equal(JSON.stringify(session.state).includes('dva-pass'), false);
     session.stop(); session.start();
-    await until(() => session.state.messages.length === 2);
+    await until(() => session.state.messages.length === 2 && session.state.historyReady?.direct === true && session.state.historyReady?.group === true);
     assert.equal(session.state.messages[1].text, '持久消息');
   } finally { session.stop(); await app.close(); }
 });

@@ -112,6 +112,7 @@ export type PendingMessage = { clientId: string; sender: User; text: string; cre
 export type Snapshot = {
   status: 'connecting' | 'online' | 'offline' | 'error' | 'replaced';
   user?: User; online: User[]; messages: Message[]; pending: PendingMessage[]; groupMessages?: GroupMessage[];
+  historyReady?: { direct: boolean; group: boolean };
   detail: string; configPath: string; mediaAvailable: boolean;
   voiceBeta?: boolean; voiceConfigured?: boolean; voiceDetail?: string;
   remoteAudio?: { level: number | null; sampledAt: number };

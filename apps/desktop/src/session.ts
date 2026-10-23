@@ -82,7 +82,7 @@ export class Session extends EventEmitter {
     super();
     this.rtc.on('signal', signal => this.emit('rtc.signal', signal));
     this.rtc.on('closed', scope => this.emit('rtc.closed', scope));
-    this.state = { status: 'connecting', online: [], messages: [], pending: [], groupMessages: [], detail: '正在读取配置', configPath, mediaAvailable: false };
+    this.state = { status: 'connecting', online: [], messages: [], pending: [], groupMessages: [], historyReady: { direct: false, group: false }, detail: '正在读取配置', configPath, mediaAvailable: false };
   }
   private emitState() { this.emit('state', structuredClone(this.state)); }
   private persist() {
@@ -92,7 +92,7 @@ export class Session extends EventEmitter {
   }
   start() {
     this.stop(); this.stopped = false; this.attempts = 0; this.cursor = 0; this.groupCursor = 0;
-    this.state.messages = []; this.state.pending = []; this.state.groupMessages = []; this.state.groupAi = undefined; this.state.online = []; this.state.user = undefined;
+    this.state.messages = []; this.state.pending = []; this.state.groupMessages = []; this.state.historyReady = { direct: false, group: false }; this.state.groupAi = undefined; this.state.online = []; this.state.user = undefined;
     try {
       this.config = ClientConfig.parse(JSON.parse(readFileSync(this.state.configPath, 'utf8')));
       this.state.user = this.config.auth.username;
@@ -181,7 +181,7 @@ export class Session extends EventEmitter {
         // Cursor advances only through server-ordered pages, never through out-of-order live pushes.
         this.cursor = packet.payload.next;
         if (packet.payload.hasMore) this.requestSync();
-        else { this.state.detail = '已连接 · 文字聊天就绪'; this.flush(); }
+        else { this.state.historyReady = { ...(this.state.historyReady ?? { direct: false, group: false }), direct: true }; this.state.detail = '已连接 · 文字聊天就绪'; this.flush(); }
       } else if (packet.type === 'group.message.stored') {
         this.mergeGroup(packet.payload);
       } else if (packet.type === 'group.message.page') {
@@ -190,6 +190,7 @@ export class Session extends EventEmitter {
         for (const message of packet.payload.messages) this.mergeGroup(message);
         this.groupCursor = packet.payload.next;
         if (packet.payload.hasMore) this.requestGroupSync();
+        else this.state.historyReady = { ...(this.state.historyReady ?? { direct: false, group: false }), group: true };
       } else if (packet.type === 'group.ai.capability') {
         this.state.groupAi = { available: packet.payload.available };
       } else if (packet.type === 'group.ai.started') {
