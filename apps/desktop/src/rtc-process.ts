@@ -21,7 +21,7 @@ const Packet = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('rtc.ok'), payload: Scope }),
   z.object({ ...base, type: z.literal('rtc.stats'), payload: Scope.extend({ stats: z.array(z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))).max(32) }) }),
   z.object({ ...base, type: z.literal('rtc.description'), payload: RtcSignal }),
-  z.object({ ...base, type: z.literal('rtc.events'), payload: Scope.extend({ candidates: z.array(Ice).max(16), connectionState: z.enum(['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']), iceState: z.string().optional(), dataState: z.enum(['unavailable', 'connecting', 'open', 'closing', 'closed']).default('unavailable'), messages: z.array(z.string().min(1).max(4096)).max(16).default([]), videoFrames: z.number().int().nonnegative().default(0), videoAttached: z.boolean().default(false) }) }),
+  z.object({ ...base, type: z.literal('rtc.events'), payload: Scope.extend({ candidates: z.array(Ice).max(16), connectionState: z.enum(['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']), iceState: z.string().optional(), dataState: z.enum(['unavailable', 'connecting', 'open', 'closing', 'closed']).default('unavailable'), messages: z.array(z.string().min(1).max(4096)).max(16).default([]), videoFrames: z.number().int().nonnegative().default(0), videoAttached: z.boolean().default(false), videoWidth: z.number().int().nonnegative().default(0), videoHeight: z.number().int().nonnegative().default(0) }) }),
 ]);
 type Packet = z.infer<typeof Packet>;
 
@@ -42,7 +42,7 @@ export class RtcProcessHost extends EventEmitter {
   private sentIce = 0;
   private deviceTimer?: ReturnType<typeof setTimeout>;
   private stopping?: Promise<'graceful' | 'forced' | 'not-running'>;
-  constructor(private executable: string, readonly scope: { callId: string; generation: 1 }, private role: 'caller' | 'callee', private args: string[] = [], private timeoutMs = 15000, private iceMode: 'disabled' | 'direct' | 'relay' = 'disabled', private iceConfig?: IceConfig, private deviceAudio?: DeviceAudio, private deviceLimitMs = 60000) {
+  constructor(private executable: string, readonly scope: { callId: string; generation: 1 }, private role: 'caller' | 'callee', private args: string[] = [], private timeoutMs = 15000, private iceMode: 'disabled' | 'direct' | 'relay' | 'all' = 'disabled', private iceConfig?: IceConfig, private deviceAudio?: DeviceAudio, private deviceLimitMs = 60000) {
     super(); Scope.parse(scope);
     if (iceConfig) this.iceConfig = IceConfig.parse(iceConfig);
     if (deviceAudio) this.deviceAudio = DeviceAudio.parse(deviceAudio);
@@ -51,7 +51,7 @@ export class RtcProcessHost extends EventEmitter {
     if (this.closed) return Promise.reject(new Error('RTC host closed'));
     if (this.args.includes('--wasapi-audio') !== !!this.deviceAudio || (this.deviceAudio && (this.args.includes('--synthetic-audio') || this.iceMode === 'disabled')))
       return Promise.reject(new Error('Explicit WASAPI device confirmation and active ICE required'));
-    if (this.iceMode === 'relay' && (!this.iceConfig || !this.iceConfig.iceServers.some(server => server.urls.some(url => /^turns?:/.test(url))) || this.iceConfig.expiresAt === null || this.iceConfig.expiresAt <= Date.now() + 60000))
+    if ((this.iceMode === 'relay' || this.iceMode === 'all') && (!this.iceConfig || !this.iceConfig.iceServers.some(server => server.urls.some(url => /^turns?:/.test(url))) || this.iceConfig.expiresAt === null || this.iceConfig.expiresAt <= Date.now() + 60000))
       return Promise.reject(new Error('Fresh TURN credentials required'));
     return this.initialization ??= this.launch();
   }
@@ -99,7 +99,7 @@ export class RtcProcessHost extends EventEmitter {
         throw new Error('Native control data channel mismatch');
       if (this.args.includes('--aec3-experimental') && hello.payload.aecAlgorithm !== 'webrtc-aec3')
         throw new Error('Experimental AEC3 engine required');
-      if ((await this.request('rtc.open', { ...this.scope, role: this.role, iceMode: this.iceMode, iceServers: this.iceMode === 'relay' ? this.iceConfig!.iceServers : [], ...(this.deviceAudio ? { deviceAudio: this.deviceAudio } : {}) })).type !== 'rtc.ok') throw new Error('RTC open failed');
+      if ((await this.request('rtc.open', { ...this.scope, role: this.role, iceMode: this.iceMode, iceServers: this.iceMode === 'relay' || this.iceMode === 'all' ? this.iceConfig!.iceServers : [], ...(this.deviceAudio ? { deviceAudio: this.deviceAudio } : {}) })).type !== 'rtc.ok') throw new Error('RTC open failed');
       if (this.role === 'caller') {
         const offer = await this.request('rtc.offer', this.scope);
         if (offer.type !== 'rtc.description' || offer.payload.kind !== 'offer') throw new Error('Expected RTC offer');
@@ -155,7 +155,7 @@ export class RtcProcessHost extends EventEmitter {
       this.emit('ice-state', packet.payload.iceState);
       this.emit('data-state', packet.payload.dataState);
       for (const message of packet.payload.messages) this.emit('data', message);
-      this.emit('video-stats', { frames: packet.payload.videoFrames, attached: packet.payload.videoAttached });
+      this.emit('video-stats', { frames: packet.payload.videoFrames, attached: packet.payload.videoAttached, width: packet.payload.videoWidth, height: packet.payload.videoHeight });
       if (packet.payload.connectionState === 'failed') this.fail('ICE/DTLS connection failed');
     }).catch(() => this.fail('RTC event polling failed')).finally(() => {
       this.polling = false;

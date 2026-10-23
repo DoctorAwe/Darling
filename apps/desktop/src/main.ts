@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session as electronSession, webContents, type NativeImage } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, type NativeImage } from 'electron';
 import { basename, extname, join, resolve } from 'node:path';
 import { release } from 'node:os';
 
@@ -11,12 +11,13 @@ import { MediaHost } from './media';
 import { AudioPair, AudioPreferences } from './audio-preferences';
 import { resolveAudioPair, defaultCallAudio, isHeadphoneOutput } from './audio-pair';
 import { RtcNegotiation } from './rtc-negotiation';
+import { RemoteRtcNegotiation } from './remote-rtc-negotiation';
 import { RtcDeviceTest } from './rtc-device-test';
 import { DeviceAudio } from './rtc-process';
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { resolveAec3Enabled } from './aec-mode';
-import { RemoteSignal } from '../../../packages/protocol/src/index';
+import { RemoteInputEvent } from '../../../packages/protocol/src/index';
 import { RemoteInputGate, RemoteInputHost } from './remote-input';
 import { remoteWindowPolicy } from './remote-window-policy';
 
@@ -37,13 +38,14 @@ type PendingAttachment = { token: string; name: string; mime: string; size: numb
 const pendingAttachments = new Map<string, PendingAttachment>();
 let screenshotCapture: { window: BrowserWindow; image: NativeImage; resolve: (value: Omit<PendingAttachment, 'path' | 'data' | 'clientId'> | null) => void } | undefined;
 const mimeFor = (name: string) => ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.txt': 'text/plain', '.pdf': 'application/pdf', '.zip': 'application/zip' } as Record<string, string>)[extname(name).toLowerCase()] ?? 'application/octet-stream';
-const pendingRemoteSignals: Array<ReturnType<typeof RemoteSignal.parse>> = [];
 let media: MediaHost;
 let rtcNegotiation: RtcNegotiation | undefined;
+let remoteRtc: RemoteRtcNegotiation;
 let rtcDeviceTest: RtcDeviceTest;
 let quitting = false;
 let mediaStarting = false;
 let voiceDevices: DeviceAudio | undefined;
+let remoteVoiceDevices: DeviceAudio | undefined;
 let callPreparation = 0;
 const voiceBeta = process.env.DARLING_VOICE_BETA === '1' || existsSync(join(__dirname, 'voice-beta.flag'));
 const aec3PackageMarker = existsSync(join(__dirname, 'aec3-experiment.flag'));
@@ -57,6 +59,13 @@ void app.whenReady().then(() => {
   const configPath = resolve(process.env.DARLING_CONFIG ?? (voiceBeta ? join(app.getAppPath(), 'config.json') : join(app.getPath('userData'), 'config.json')));
   session = new Session(configPath, app.getPath('userData'));
   remoteInput = new RemoteInputHost(resolve(join(__dirname, 'native/darling-remote-input.exe')));
+  remoteRtc = new RemoteRtcNegotiation(session, rtcExecutable, async value => {
+    const remote = session.state.remote;
+    if (!remote || remote.controlled !== session.state.user || !remote.permissions.control || !['connecting', 'active'].includes(remote.phase)) throw new Error('当前未授权远程操作');
+    await remoteInput.send(remoteInputGate.parse(value));
+  }, () => remoteVoiceDevices, aec3Enabled, value => {
+    try { appendFileSync(join(app.getPath('userData'), 'remote-desktop.log'), `${JSON.stringify(value)}\n`, 'utf8'); } catch { /* Diagnostics must not interrupt the session. */ }
+  });
   // Explicit diagnostic opt-in; never enables invite/accept or real audio.
   if (!voiceBeta && process.env.DARLING_RTC_NEGOTIATION_EXE)
     rtcNegotiation = new RtcNegotiation(session, resolve(process.env.DARLING_RTC_NEGOTIATION_EXE));
@@ -84,22 +93,41 @@ void app.whenReady().then(() => {
     webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, autoplayPolicy: 'no-user-gesture-required' },
   });
   ipcMain.handle('session:snapshot', () => structuredClone(session.state));
-  ipcMain.handle('remote:action', (_event, action: unknown, sessionId: unknown, permissions: unknown) => {
+  ipcMain.handle('remote:action', async (_event, action: unknown, sessionId: unknown, permissions: unknown) => {
     if ((action === 'invite' || action === 'accept') && session.state.call && session.state.call.phase !== 'ended') return { ok: false, error: '请先结束语音通话，再开始远程桌面' };
+    if (action === 'invite' || action === 'accept') {
+      if (mediaStarting || rtcDeviceTest.active || media.state.capture?.running || media.state.playback?.running) return { ok: false, error: '请先停止设备测试' };
+      mediaStarting = true;
+      try {
+        await media.inspect();
+        remoteVoiceDevices = DeviceAudio.parse(defaultCallAudio(media.state.devices));
+        await session.refreshIce();
+      } catch { return { ok: false, error: '无法准备系统默认音频设备或中继，请检查 Windows 默认输入/输出和网络' }; }
+      finally { mediaStarting = false; }
+    }
+    if (action === 'end') { remoteVoiceDevices = undefined; void remoteRtc.stop(); }
     return session.remoteAction(action, sessionId, permissions);
   });
   ipcMain.handle('remote:permissions', (_event, sessionId: unknown, permissions: unknown) => session.remotePermissions(sessionId, permissions));
-  ipcMain.handle('remote:ice', async () => { await session.refreshIce(); const ice = session.getIceConfig(); if (!ice) throw new Error('中继配置不可用'); return ice; });
-  ipcMain.handle('remote:signal', (_event, value: unknown) => session.sendRemoteSignal(RemoteSignal.parse(value)));
-  ipcMain.handle('remote:ready', (_event, sessionId: unknown) => { if (typeof sessionId !== 'string' || session.state.remote?.sessionId !== sessionId) throw new Error('远程桌面会话已变化'); session.remoteReady(sessionId); });
-  ipcMain.handle('remote:drain-signals', (_event, sessionId: unknown) => {
-    if (typeof sessionId !== 'string' || session.state.remote?.sessionId !== sessionId) return [];
-    return pendingRemoteSignals.splice(0).filter(signal => signal.sessionId === sessionId);
-  });
   ipcMain.handle('remote:input', async (event, sessionId: unknown, value: unknown) => {
     const remote = session.state.remote;
-    if (typeof sessionId !== 'string' || !remote || remote.sessionId !== sessionId || remote.controlled !== session.state.user || !remote.permissions.control || !['connecting', 'active'].includes(remote.phase) || !remoteStatusWindow || remoteStatusWindow.isDestroyed() || event.sender.id !== remoteStatusWindow.webContents.id) throw new Error('当前未授权远程操作');
-    await remoteInput.send(remoteInputGate.parse(value));
+    if (typeof sessionId !== 'string' || !remote || remote.sessionId !== sessionId || remote.controller !== session.state.user || !remote.permissions.control || !['connecting', 'active'].includes(remote.phase) || !remoteControlWindow || remoteControlWindow.isDestroyed() || event.sender.id !== remoteControlWindow.webContents.id) throw new Error('当前未授权远程操作');
+    await remoteRtc.sendControl(sessionId, RemoteInputEvent.parse(value));
+  });
+  ipcMain.handle('remote:audio', async (event, sessionId: unknown, micMuted: unknown, speakerMuted: unknown) => {
+    const remote = session.state.remote;
+    const allowed = [remoteControlWindow, remoteStatusWindow].some(target => target && !target.isDestroyed() && target.webContents.id === event.sender.id);
+    if (typeof sessionId !== 'string' || typeof micMuted !== 'boolean' || typeof speakerMuted !== 'boolean' || remote?.sessionId !== sessionId || !['connecting', 'active'].includes(remote.phase) || !allowed) throw new Error('远程语音不可用');
+    await remoteRtc.setAudio(sessionId, micMuted, speakerMuted);
+  });
+  ipcMain.handle('remote:video-bounds', async (event, sessionId: unknown, value: unknown) => {
+    const remote = session.state.remote;
+    if (typeof sessionId !== 'string' || !remote || remote.sessionId !== sessionId || remote.controller !== session.state.user || !remoteControlWindow || remoteControlWindow.isDestroyed() || event.sender.id !== remoteControlWindow.webContents.id) throw new Error('远程画面不可用');
+    const bounds = value as { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | undefined;
+    if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isInteger)) throw new Error('远程画面尺寸无效');
+    const handle = remoteControlWindow.getNativeWindowHandle();
+    const parent = handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0));
+    await remoteRtc.setVideoWindow(sessionId, { parent, x: bounds.x as number, y: bounds.y as number, width: bounds.width as number, height: bounds.height as number });
   });
   ipcMain.handle('remote:diagnostic', (event, sessionId: unknown, stage: unknown, detail: unknown) => {
     const remote = session.state.remote;
@@ -294,26 +322,6 @@ void app.whenReady().then(() => {
     remoteWindow.on('closed', () => { if (surface === 'remote-control') remoteControlWindow = undefined; else remoteStatusWindow = undefined; });
     return remoteWindow;
   };
-  electronSession.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
-    const remote = session.state.remote;
-    const requester = request.frame ? webContents.fromFrame(request.frame) : undefined;
-    if (!remote || remote.controlled !== session.state.user || !['connecting', 'active'].includes(remote.phase) || !remoteStatusWindow || remoteStatusWindow.isDestroyed() || requester?.id !== remoteStatusWindow.webContents.id) return callback({});
-    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false });
-    const primaryId = String(screen.getPrimaryDisplay().id);
-    const primary = sources.find(source => source.display_id === primaryId) ?? sources[0]; if (!primary) return callback({});
-    callback({ video: primary, ...(request.audioRequested && remote.permissions.audio ? { audio: 'loopback' as const } : {}) });
-  });
-  ipcMain.handle('remote:capture-source', async event => {
-    const remote = session.state.remote;
-    if (!remote || remote.controlled !== session.state.user || !['connecting', 'active'].includes(remote.phase) ||
-        !remoteStatusWindow || remoteStatusWindow.isDestroyed() || event.sender.id !== remoteStatusWindow.webContents.id)
-      throw new Error('当前没有可共享的远程桌面会话');
-    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false });
-    const primaryId = String(screen.getPrimaryDisplay().id);
-    const primary = sources.find(source => source.display_id === primaryId) ?? sources[0];
-    if (!primary) throw new Error('找不到主显示器');
-    return primary.id;
-  });
   const syncRemoteWindows = (state: typeof session.state) => {
     const remote = state.remote; const policy = remoteWindowPolicy(remote, state.user, !!remoteControlWindow);
     if (policy.createController && !remoteControlWindow) remoteControlWindow = openRemoteSurface('remote-control');
@@ -325,10 +333,6 @@ void app.whenReady().then(() => {
   session.on('state', state => {
     for (const target of [window, remoteControlWindow, remoteStatusWindow]) if (target && !target.isDestroyed()) target.webContents.send('session:state', state);
     syncRemoteWindows(state);
-  });
-  session.on('remote.signal', value => {
-    const signal = RemoteSignal.parse(value); pendingRemoteSignals.push(signal); if (pendingRemoteSignals.length > 128) pendingRemoteSignals.shift();
-    for (const target of [remoteControlWindow, remoteStatusWindow]) if (target && !target.isDestroyed()) target.webContents.send('remote:signal', signal);
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
@@ -344,6 +348,7 @@ void app.whenReady().then(() => {
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', event => {
   const rtcStopped = rtcNegotiation?.dispose();
+  const remoteStopped = remoteRtc?.dispose();
   session?.stop();
-  if (!quitting && media) { event.preventDefault(); quitting = true; void Promise.all([rtcStopped, rtcDeviceTest?.stop(), media.stop(), remoteInput?.stop()]).finally(() => app.quit()); }
+  if (!quitting && media) { event.preventDefault(); quitting = true; void Promise.all([rtcStopped, remoteStopped, rtcDeviceTest?.stop(), media.stop(), remoteInput?.stop()]).finally(() => app.quit()); }
 });

@@ -5,17 +5,9 @@ const api: DesktopApi = {
   callAudio: (callId, micMuted, speakerMuted) => ipcRenderer.invoke('voice:audio', callId, micMuted, speakerMuted),
   remoteAction: (action, sessionId, permissions) => ipcRenderer.invoke('remote:action', action, sessionId, permissions),
   remotePermissions: (sessionId, permissions) => ipcRenderer.invoke('remote:permissions', sessionId, permissions),
-  remoteIceConfig: () => ipcRenderer.invoke('remote:ice'),
-  remoteCaptureSource: () => ipcRenderer.invoke('remote:capture-source'),
-  remoteSignal: signal => ipcRenderer.invoke('remote:signal', signal),
-  remoteReady: sessionId => ipcRenderer.invoke('remote:ready', sessionId),
-  remoteDrainSignals: sessionId => ipcRenderer.invoke('remote:drain-signals', sessionId),
-  subscribeRemoteSignal: listener => {
-    const handler = (_event: Electron.IpcRendererEvent, signal: Parameters<typeof listener>[0]) => listener(signal);
-    ipcRenderer.on('remote:signal', handler);
-    return () => ipcRenderer.removeListener('remote:signal', handler);
-  },
   remoteInput: (sessionId, event) => ipcRenderer.invoke('remote:input', sessionId, event),
+  remoteAudio: (sessionId, micMuted, speakerMuted) => ipcRenderer.invoke('remote:audio', sessionId, micMuted, speakerMuted),
+  remoteVideoBounds: (sessionId, bounds) => ipcRenderer.invoke('remote:video-bounds', sessionId, bounds),
   remoteDiagnostic: (sessionId, stage, detail) => ipcRenderer.invoke('remote:diagnostic', sessionId, stage, detail),
   voiceConfigure: value => ipcRenderer.invoke('voice:configure', value),
   rtcDeviceSnapshot: () => ipcRenderer.invoke('rtc-device:snapshot'),

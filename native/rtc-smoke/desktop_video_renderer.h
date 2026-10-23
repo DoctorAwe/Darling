@@ -25,6 +25,8 @@ class DesktopVideoRenderer final
   void Resize(int x, int y, int width, int height);
   void OnFrame(const webrtc::VideoFrame& frame) override;
   uint64_t frames() const { return frames_.load(); }
+  int width() const { return width_.load(); }
+  int height() const { return height_.load(); }
   bool attached() const { return window_.load() != nullptr; }
 
  private:
@@ -38,6 +40,8 @@ class DesktopVideoRenderer final
   std::jthread window_thread_;
   std::atomic<HWND> window_{nullptr};
   std::atomic<uint64_t> frames_{0};
+  std::atomic<int> width_{0};
+  std::atomic<int> height_{0};
   std::mutex mutex_;
   Bounds bounds_;
   BITMAPINFO bitmap_{};

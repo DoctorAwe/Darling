@@ -184,7 +184,7 @@ class Engine {
     remote_candidates = 0;
   }
   ~Engine() { Close(); signaling->Stop(); worker->Stop(); network->Stop(); }
-  bool Open(const std::string& id, const std::string& requested_role, bool direct, const Json& servers, const Json& audio) {
+  bool Open(const std::string& id, const std::string& requested_role, const std::string& ice_mode, const Json& servers, const Json& audio) {
     if (!call_id.empty()) return false;
     signaling->BlockingCall([&] {
       webrtc::PeerConnectionFactoryDependencies deps;
@@ -272,14 +272,14 @@ class Engine {
         });
         if (!selected) return;
       }
-      if (direct) {
+      if (ice_mode == "direct" || ice_mode == "all") {
         webrtc::PeerConnectionFactoryInterface::Options options;
         // Diagnostic same-host tests may use loopback as well as real adapters.
         options.network_ignore_mask = 0;
         factory->SetOptions(options);
       }
       webrtc::PeerConnectionInterface::RTCConfiguration config;
-      config.type = direct ? webrtc::PeerConnectionInterface::kAll : webrtc::PeerConnectionInterface::kRelay;
+      config.type = ice_mode == "relay" ? webrtc::PeerConnectionInterface::kRelay : webrtc::PeerConnectionInterface::kAll;
       for (const auto& item : servers) {
         webrtc::PeerConnectionInterface::IceServer server;
         for (const auto& url : item["urls"]) server.urls.push_back(url.get<std::string>());
@@ -466,11 +466,11 @@ int main(int argc, char** argv) {
         if (type == "rtc.open") {
           if (!String(payload, "role", 6) || (payload["role"] != "caller" && payload["role"] != "callee")) error = "INVALID_ROLE";
           else if (engine.desktop_enabled && payload["role"] != "callee") error = "DESKTOP_VIDEO_REQUIRES_CALLEE";
-          else if (payload.contains("iceMode") && payload["iceMode"] != "direct" && payload["iceMode"] != "disabled" && payload["iceMode"] != "relay") error = "INVALID_ICE_MODE";
+          else if (payload.contains("iceMode") && payload["iceMode"] != "direct" && payload["iceMode"] != "disabled" && payload["iceMode"] != "relay" && payload["iceMode"] != "all") error = "INVALID_ICE_MODE";
           else if (!ServersValid(payload.value("iceServers", Json::array()))) error = "INVALID_ICE_SERVERS";
           else if (payload.value("iceMode", Json()) == "relay" && payload.value("iceServers", Json::array()).empty()) error = "ICE_SERVERS_REQUIRED";
-          else if (payload.value("iceMode", Json()) != "relay" && !payload.value("iceServers", Json::array()).empty()) error = "ICE_SERVERS_NOT_ALLOWED";
-          else if (engine.wasapi_enabled && payload.value("iceMode", Json()) != "direct" && payload.value("iceMode", Json()) != "relay") error = "DEVICE_AUDIO_REQUIRES_ICE";
+          else if (payload.value("iceMode", Json()) != "relay" && payload.value("iceMode", Json()) != "all" && !payload.value("iceServers", Json::array()).empty()) error = "ICE_SERVERS_NOT_ALLOWED";
+          else if (engine.wasapi_enabled && payload.value("iceMode", Json()) != "direct" && payload.value("iceMode", Json()) != "relay" && payload.value("iceMode", Json()) != "all") error = "DEVICE_AUDIO_REQUIRES_ICE";
           else if (engine.wasapi_enabled && (!payload.contains("deviceAudio") || !payload["deviceAudio"].is_object() ||
             !String(payload["deviceAudio"], "inputDeviceId", 127) || !String(payload["deviceAudio"], "outputDeviceId", 127) ||
             payload["deviceAudio"]["inputDeviceId"] == "default" || payload["deviceAudio"]["outputDeviceId"] == "default" ||
@@ -480,7 +480,7 @@ int main(int argc, char** argv) {
             (payload["deviceAudio"].value("outputProfile", Json()) != "headphones" && payload["deviceAudio"].value("outputProfile", Json()) != "speakers") ||
             !payload["deviceAudio"].contains("noiseSuppression") || !payload["deviceAudio"]["noiseSuppression"].is_boolean())) error = "DEVICE_AUDIO_CONFIRMATION_REQUIRED";
           else if (!engine.wasapi_enabled && payload.contains("deviceAudio")) error = "DEVICE_AUDIO_NOT_ALLOWED";
-          else if (!engine.Open(id, payload["role"], payload.value("iceMode", Json()) == "direct", payload.value("iceServers", Json::array()), payload.value("deviceAudio", Json::object()))) error = "OPEN_FAILED_OR_BUSY";
+          else if (!engine.Open(id, payload["role"], payload.value("iceMode", "disabled"), payload.value("iceServers", Json::array()), payload.value("deviceAudio", Json::object()))) error = "OPEN_FAILED_OR_BUSY";
         } else if (engine.call_id != id) error = "STALE_CALL";
         else if (type == "rtc.close") engine.Close();
         else if (type == "rtc.audio") {
@@ -588,6 +588,8 @@ int main(int argc, char** argv) {
             response["dataState"] = engine.peer_observer.ControlState();
             response["videoFrames"] = engine.peer_observer.video_renderer ? engine.peer_observer.video_renderer->frames() : 0;
             response["videoAttached"] = engine.peer_observer.video_renderer && engine.peer_observer.video_renderer->attached();
+            response["videoWidth"] = engine.peer_observer.video_renderer ? engine.peer_observer.video_renderer->width() : 0;
+            response["videoHeight"] = engine.peer_observer.video_renderer ? engine.peer_observer.video_renderer->height() : 0;
             response["messages"] = Json::array();
             auto& messages = engine.peer_observer.control_messages;
             const size_t message_count = messages.size() < 16 ? messages.size() : 16;

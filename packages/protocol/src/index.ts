@@ -101,6 +101,7 @@ export type Snapshot = {
   remoteAudio?: { level: number | null; sampledAt: number };
   call?: CallState | null; callError?: string; callPending?: boolean;
   remote?: RemoteSessionState | null; remoteError?: string; remotePending?: boolean;
+  remoteNative?: { connected: boolean; controlReady: boolean; videoWidth: number; videoHeight: number };
 };
 export type RtcInputMetrics = {
   sampledAt: number; sentPackets: number | null; receivedPackets: number | null;
@@ -130,13 +131,9 @@ export interface DesktopApi {
   callAction(action: 'invite' | 'accept' | 'end', callId?: string): Promise<{ ok: boolean; error?: string }>;
   remoteAction(action: 'invite' | 'accept' | 'end', sessionId?: string, permissions?: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;
   remotePermissions(sessionId: string, permissions: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;
-  remoteIceConfig(): Promise<IceConfig>;
-  remoteCaptureSource(): Promise<string>;
-  remoteSignal(signal: RemoteSignal): Promise<void>;
-  remoteReady(sessionId: string): Promise<void>;
-  remoteDrainSignals(sessionId: string): Promise<RemoteSignal[]>;
-  subscribeRemoteSignal(listener: (signal: RemoteSignal) => void): () => void;
   remoteInput(sessionId: string, event: RemoteInputEvent): Promise<void>;
+  remoteAudio(sessionId: string, micMuted: boolean, speakerMuted: boolean): Promise<void>;
+  remoteVideoBounds(sessionId: string, bounds: { x: number; y: number; width: number; height: number }): Promise<void>;
   remoteDiagnostic(sessionId: string, stage: string, detail: string): Promise<void>;
   mediaSnapshot(): Promise<MediaState>;
   mediaInspect(): Promise<MediaState>;

@@ -69,6 +69,9 @@ void DesktopVideoRenderer::Run(std::stop_token stop, HWND parent) {
       WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, bounds.x, bounds.y,
       bounds.width, bounds.height, parent, nullptr, GetModuleHandleW(nullptr), this);
   if (!window) return;
+  // The Electron stage remains the sole input surface. A disabled child still
+  // paints normally but Windows routes pointer/keyboard input to the parent.
+  EnableWindow(window, FALSE);
   window_.store(window);
   MSG message;
   while (!stop.stop_requested() && GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -109,6 +112,8 @@ void DesktopVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
   if (!buffer) return;
   const int width = buffer->width();
   const int height = buffer->height();
+  width_.store(width);
+  height_.store(height);
   {
     std::lock_guard lock(mutex_);
     if (bitmap_.bmiHeader.biWidth != width ||

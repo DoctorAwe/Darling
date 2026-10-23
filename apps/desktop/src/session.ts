@@ -33,6 +33,10 @@ export class Session extends EventEmitter {
   }
   voiceStatus(detail: string) { if (this.state.voiceDetail === detail) return; this.state.voiceDetail = detail; this.emitState(); }
   remoteLevel(level: number | null) { this.state.remoteAudio = { level, sampledAt: Date.now() }; this.emitState(); }
+  remoteNativeStatus(value?: Snapshot['remoteNative']) {
+    if (JSON.stringify(this.state.remoteNative) === JSON.stringify(value)) return;
+    this.state.remoteNative = value; this.emitState();
+  }
   mediaReady(callId: string) { this.transmit({ version: 1, type: 'call.ready', requestId: randomUUID(), payload: { callId } }); }
   async refreshIce(): Promise<void> {
     if (this.state.status !== 'online') throw new Error('请先连接服务器');
@@ -103,7 +107,7 @@ export class Session extends EventEmitter {
   stop() {
     this.rtc.clear();
     this.ice = undefined;
-    this.clearCallRequest(); this.clearRemoteRequest(); this.state.call = null; this.state.callError = undefined; this.state.remote = null; this.state.remoteError = undefined;
+    this.clearCallRequest(); this.clearRemoteRequest(); this.state.call = null; this.state.callError = undefined; this.state.remote = null; this.state.remoteError = undefined; this.state.remoteNative = undefined;
     this.stopped = true; this.generation++;
     clearTimeout(this.timer); clearInterval(this.watchdog);
     this.socket?.removeAllListeners(); this.socket?.on('error', () => {}); this.socket?.terminate();
@@ -157,6 +161,7 @@ export class Session extends EventEmitter {
       } else if (packet.type === 'remote.state') {
         if (packet.requestId && packet.requestId !== this.remoteRequest?.id) return;
         if (packet.requestId) this.clearRemoteRequest();
+        if (this.state.remote?.sessionId !== packet.payload.session?.sessionId || packet.payload.session?.phase === 'ended') this.state.remoteNative = undefined;
         this.state.remote = packet.payload.session; this.state.remoteError = undefined;
         this.emit('remote.state', structuredClone(packet.payload.session));
       } else if (packet.type === 'remote.signal') {
