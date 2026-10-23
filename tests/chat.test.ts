@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import JSZip from 'jszip';
 import WebSocket from 'ws';
 import { createServer } from '../apps/server/src/app';
 import { MessageStore } from '../apps/server/src/store';
@@ -28,6 +29,23 @@ async function client(url: string) {
   };
   const login = async (user: User, password = user + '-pass') => wait('auth.ok', send('auth.login', { username: user, password }));
   return { socket, send, wait, login };
+}
+
+function testPdf(text: string) {
+  const stream = `BT /F1 18 Tf 50 700 Td (${text}) Tj ET`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`
+  ];
+  let output = '%PDF-1.4\n'; const offsets = [0];
+  objects.forEach((object, index) => { offsets.push(Buffer.byteLength(output)); output += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+  const xref = Buffer.byteLength(output); output += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  offsets.slice(1).forEach(offset => { output += `${String(offset).padStart(10, '0')} 00000 n \n`; });
+  output += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return Buffer.from(output);
 }
 
 test('real WebSocket: authentication, delivery, deduplication, sync and session replacement', async () => {
@@ -214,6 +232,30 @@ test('text group attachments are indexed and relevant excerpts reach Echo', asyn
     const context = calls[0].find(message => message.role === 'system' && typeof message.content === 'string' && message.content.includes('检索摘录'));
     assert.match(String(context?.content), /音频方案\.md/); assert.match(String(context?.content), /PBFDAF 是备用回声消除路径/);
     const attachmentLabel = calls[0].find(message => message.role === 'user' && message.content === '[附件：音频方案.md]'); assert.ok(attachmentLabel);
+  } finally { await app.close(); rmSync(attachmentsDir, { recursive: true, force: true }); }
+});
+
+test('PDF pages and DOCX paragraphs retain source locations for Echo', async () => {
+  const attachmentsDir = mkdtempSync(join(tmpdir(), 'darling-rich-doc-files-')); const calls: AiInputMessage[][] = [];
+  const fake: AiClient = { model: 'test-rich-docs', async *stream(messages) { calls.push(messages); yield '文档回答'; } };
+  const app = await createServer({ database: ':memory:', attachmentsDir, users: { dva: 'dva-pass', mercy: 'mercy-pass' }, aiClient: fake });
+  await app.listen({ host: '127.0.0.1', port: 0 }); const port = (app.server.address() as { port: number }).port; const url = `ws://127.0.0.1:${port}/ws`;
+  try {
+    const dva = await client(url); await dva.login('dva');
+    const upload = async (name: string, mime: string, body: Buffer) => {
+      const response = await fetch(`http://127.0.0.1:${port}/groups/dva-mercy-echo/attachments`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'x-darling-user': 'dva', 'x-darling-password': 'dva-pass', 'x-client-id': randomUUID(), 'x-file-name': encodeURIComponent(name), 'x-mime-type': mime }, body: body as unknown as BodyInit });
+      assert.equal(response.status, 201); await dva.wait('group.message.stored');
+    };
+    await upload('network.pdf', 'application/pdf', testPdf('NVENC keeps remote desktop latency low.'));
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+    zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+    zip.file('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>AEC3 is the primary echo cancellation path.</w:t></w:r></w:p><w:p><w:r><w:t>RNNoise follows residual echo suppression.</w:t></w:r></w:p></w:body></w:document>');
+    await upload('audio.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', await zip.generateAsync({ type: 'nodebuffer' }));
+    await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: '@Echo Compare NVENC latency and AEC3.' })); await dva.wait('group.ai.completed');
+    const context = calls[0].find(message => message.role === 'system' && typeof message.content === 'string' && message.content.includes('检索摘录'));
+    assert.match(String(context?.content), /network\.pdf[\s\S]*第 1 页[\s\S]*NVENC keeps remote desktop latency low/);
+    assert.match(String(context?.content), /audio\.docx[\s\S]*第 1 段[\s\S]*AEC3 is the primary echo cancellation path/);
   } finally { await app.close(); rmSync(attachmentsDir, { recursive: true, force: true }); }
 });
 
