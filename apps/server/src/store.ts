@@ -29,6 +29,7 @@ export class MessageStore {
       CREATE TABLE IF NOT EXISTS group_messages(id TEXT PRIMARY KEY,groupId TEXT NOT NULL,clientId TEXT NOT NULL,sender TEXT NOT NULL,messageType TEXT NOT NULL,text TEXT NOT NULL,seq INTEGER NOT NULL,createdAt TEXT NOT NULL,attachmentId TEXT,aiRequestId TEXT,aiModel TEXT,UNIQUE(groupId,seq),UNIQUE(groupId,sender,clientId));
       CREATE TABLE IF NOT EXISTS group_attachments(id TEXT PRIMARY KEY,groupId TEXT NOT NULL,uploader TEXT NOT NULL,name TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,path TEXT NOT NULL,analysisStatus TEXT NOT NULL,createdAt TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS ai_file_bindings(attachmentId TEXT NOT NULL,provider TEXT NOT NULL,providerFileId TEXT NOT NULL,expiresAt TEXT,createdAt TEXT NOT NULL,PRIMARY KEY(attachmentId,provider));
+      CREATE TABLE IF NOT EXISTS document_chunks(id TEXT PRIMARY KEY,attachmentId TEXT NOT NULL,chunkIndex INTEGER NOT NULL,content TEXT NOT NULL,location TEXT NOT NULL,tokenEstimate INTEGER NOT NULL,UNIQUE(attachmentId,chunkIndex));
       INSERT OR IGNORE INTO schema_migrations VALUES(3);`);
     const groupColumns = this.db.prepare('PRAGMA table_info(group_messages)').all() as Array<{ name: string }>;
     if (!groupColumns.some(column => column.name === 'aiRequestId')) this.db.exec('ALTER TABLE group_messages ADD COLUMN aiRequestId TEXT');
@@ -116,6 +117,16 @@ export class MessageStore {
   groupAttachment(id: string) { return this.db.prepare('SELECT id,groupId,uploader,name,mime,size,path,analysisStatus,createdAt FROM group_attachments WHERE id=?').get(id) as (Attachment & { groupId: AiGroupId; uploader: User; path: string; analysisStatus: string; createdAt: string }) | undefined; }
   aiFileBinding(attachmentId: string) { return this.db.prepare("SELECT providerFileId,expiresAt FROM ai_file_bindings WHERE attachmentId=? AND provider='deepseek'").get(attachmentId) as { providerFileId: string; expiresAt: string | null } | undefined; }
   saveAiFileBinding(attachmentId: string, providerFileId: string, expiresAt: string | null) { this.db.prepare("INSERT OR REPLACE INTO ai_file_bindings(attachmentId,provider,providerFileId,expiresAt,createdAt) VALUES(?,'deepseek',?,?,?)").run(attachmentId, providerFileId, expiresAt, new Date().toISOString()); }
+  setGroupAttachmentAnalysis(attachmentId: string, status: 'extracting' | 'ready' | 'failed') { this.db.prepare('UPDATE group_attachments SET analysisStatus=? WHERE id=?').run(status, attachmentId); }
+  replaceDocumentChunks(attachmentId: string, chunks: Array<{ content: string; location: string; tokenEstimate: number }>) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('DELETE FROM document_chunks WHERE attachmentId=?').run(attachmentId);
+      const insert = this.db.prepare('INSERT INTO document_chunks(id,attachmentId,chunkIndex,content,location,tokenEstimate) VALUES(?,?,?,?,?,?)');
+      chunks.forEach((chunk, index) => insert.run(randomUUID(), attachmentId, index, chunk.content, chunk.location, chunk.tokenEstimate)); this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  documentChunks(attachmentId: string) { return this.db.prepare('SELECT content,location,tokenEstimate FROM document_chunks WHERE attachmentId=? ORDER BY chunkIndex').all(attachmentId) as Array<{ content: string; location: string; tokenEstimate: number }>; }
   saveAssistant(groupId: AiGroupId, requestId: string, text: string, model: string): GroupMessage {
     this.db.exec('BEGIN IMMEDIATE');
     try {

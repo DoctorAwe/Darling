@@ -199,6 +199,24 @@ test('group images upload independently and are reused as DeepSeek file context'
   } finally { await app.close(); rmSync(attachmentsDir, { recursive: true, force: true }); }
 });
 
+test('text group attachments are indexed and relevant excerpts reach Echo', async () => {
+  const attachmentsDir = mkdtempSync(join(tmpdir(), 'darling-doc-files-')); const calls: AiInputMessage[][] = [];
+  const fake: AiClient = { model: 'test-docs', async *stream(messages) { calls.push(messages); yield '文档回答'; } };
+  const app = await createServer({ database: ':memory:', attachmentsDir, users: { dva: 'dva-pass', mercy: 'mercy-pass' }, aiClient: fake });
+  await app.listen({ host: '127.0.0.1', port: 0 }); const port = (app.server.address() as { port: number }).port; const url = `ws://127.0.0.1:${port}/ws`;
+  try {
+    const dva = await client(url); await dva.login('dva');
+    const document = Buffer.from('# 音频方案\nPBFDAF 是备用回声消除路径。\nAEC3 是当前主线路径。', 'utf8');
+    const response = await fetch(`http://127.0.0.1:${port}/groups/dva-mercy-echo/attachments`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'x-darling-user': 'dva', 'x-darling-password': 'dva-pass', 'x-client-id': randomUUID(), 'x-file-name': encodeURIComponent('音频方案.md'), 'x-mime-type': 'text/markdown' }, body: document });
+    assert.equal(response.status, 201); await dva.wait('group.message.stored');
+    await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: '@Echo 文档里的 PBFDAF 是什么？' })); await dva.wait('group.ai.completed');
+    assert.equal(calls.length, 1);
+    const context = calls[0].find(message => message.role === 'system' && typeof message.content === 'string' && message.content.includes('检索摘录'));
+    assert.match(String(context?.content), /音频方案\.md/); assert.match(String(context?.content), /PBFDAF 是备用回声消除路径/);
+    const attachmentLabel = calls[0].find(message => message.role === 'user' && message.content === '[附件：音频方案.md]'); assert.ok(attachmentLabel);
+  } finally { await app.close(); rmSync(attachmentsDir, { recursive: true, force: true }); }
+});
+
 test('real WebSocket call signaling: auth, crossed invite, accept, replacement and stale call', async () => {
   const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' } });
   await app.listen({ host: '127.0.0.1', port: 0 });
