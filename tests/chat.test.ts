@@ -11,7 +11,7 @@ import { createServer } from '../apps/server/src/app';
 import { MessageStore } from '../apps/server/src/store';
 import { Session } from '../apps/desktop/src/session';
 import type { ServerPacket, User } from '../packages/protocol/src/index';
-import type { AiClient, AiInputMessage } from '../apps/server/src/ai/deepseek-client';
+import { AiSettings, aiConfigFromEnvironment, type AiClient, type AiInputMessage } from '../apps/server/src/ai/deepseek-client';
 
 async function client(url: string) {
   const socket = new WebSocket(url);
@@ -47,6 +47,12 @@ function testPdf(text: string) {
   output += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
   return Buffer.from(output);
 }
+
+test('AI settings resolve an environment key without leaking apiKeyEnv into strict client config', () => {
+  const settings = AiSettings.parse({ enabled: true, baseUrl: 'https://api.deepseek.com', apiKeyEnv: 'TEST_DEEPSEEK_KEY', model: 'deepseek-flash', reasoningEffort: 'low', maxOutputTokens: 4096, requestTimeoutMs: 90000 });
+  const config = aiConfigFromEnvironment(settings, { TEST_DEEPSEEK_KEY: 'secret' });
+  assert.equal(config?.apiKey, 'secret'); assert.equal('apiKeyEnv' in (config ?? {}), false);
+});
 
 test('real WebSocket: authentication, delivery, deduplication, sync and session replacement', async () => {
   const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' } });

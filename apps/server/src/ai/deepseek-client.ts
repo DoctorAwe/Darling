@@ -11,6 +11,14 @@ export const AiConfig = z.object({
   requestTimeoutMs: z.number().int().min(1000).max(180000).default(90000),
 }).strict();
 export type AiConfig = z.infer<typeof AiConfig>;
+export const AiSettings = AiConfig.omit({ apiKey: true }).extend({ apiKeyEnv: z.string().min(1).default('DEEPSEEK_API_KEY') }).strict();
+export type AiSettings = z.infer<typeof AiSettings>;
+
+export function aiConfigFromEnvironment(settings: AiSettings | undefined, environment: NodeJS.ProcessEnv = process.env) {
+  if (!settings?.enabled) return undefined;
+  const { apiKeyEnv, ...config } = settings; const apiKey = environment[apiKeyEnv];
+  return apiKey ? AiConfig.parse({ ...config, apiKey }) : undefined;
+}
 
 export type AiContent = string | Array<{ type: 'text'; text: string } | { type: 'file'; file_id: string }>;
 export type AiInputMessage = { role: 'system' | 'user' | 'assistant'; content: AiContent; name?: 'dva' | 'mercy' };
