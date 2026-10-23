@@ -16,7 +16,15 @@ export function ScreenshotSurface() {
   const valid = !!selection && selection.width >= 4 && selection.height >= 4;
   const cancel = () => window.darling.screenshotComplete();
   const confirm = () => { if (valid) window.darling.screenshotComplete(selection); };
-  useEffect(() => { const off = window.darling.subscribeScreenshot(setImage); window.darling.screenshotReady(); return off; }, []);
+  useEffect(() => {
+    let objectUrl = '';
+    const off = window.darling.subscribeScreenshot(jpeg => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = URL.createObjectURL(new Blob([Uint8Array.from(jpeg)], { type: 'image/jpeg' })); setImage(objectUrl);
+    });
+    window.darling.screenshotReady();
+    return () => { off(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, []);
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
       if (event.key === 'Escape') cancel();

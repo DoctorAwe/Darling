@@ -25,7 +25,7 @@ const api: DesktopApi = {
   attachmentPick: () => ipcRenderer.invoke('attachment:pick'),
   attachmentScreenshot: () => ipcRenderer.invoke('attachment:screenshot'),
   subscribeScreenshot: listener => {
-    const handler = (_event: Electron.IpcRendererEvent, dataUrl: string) => listener(dataUrl);
+    const handler = (_event: Electron.IpcRendererEvent, jpeg: Uint8Array) => listener(jpeg);
     ipcRenderer.on('screenshot:image', handler);
     return () => ipcRenderer.removeListener('screenshot:image', handler);
   },

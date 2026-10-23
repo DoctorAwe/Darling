@@ -19,6 +19,9 @@ app.on('web-contents-created', (_event, contents) => {
     try {
       if (new URL(contents.getURL()).searchParams.get('surface') === 'screenshot') {
         await new Promise(resolve => setTimeout(resolve, 150));
+        const coverage = await contents.executeJavaScript(`({ width: innerWidth, height: innerHeight, screenWidth: screen.width, screenHeight: screen.height, imageReady: !!document.querySelector('.screenshot-surface > img') })`);
+        if (Math.abs(coverage.width - coverage.screenWidth) > 1 || Math.abs(coverage.height - coverage.screenHeight) > 1) throw new Error('Screenshot selector does not cover the full primary display: ' + JSON.stringify(coverage));
+        if (!coverage.imageReady) throw new Error('Screenshot selector image was not ready promptly');
         await contents.executeJavaScript(`window.darling.screenshotComplete({ x: 10, y: 10, width: 64, height: 48 })`);
         return;
       }

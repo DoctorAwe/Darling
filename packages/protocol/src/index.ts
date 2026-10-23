@@ -119,7 +119,7 @@ export interface DesktopApi {
   send(text: string): Promise<{ ok: boolean; error?: string }>;
   attachmentPick(): Promise<Array<{ token: string; name: string; mime: string; size: number; image: boolean }>>;
   attachmentScreenshot(): Promise<{ token: string; name: string; mime: string; size: number; image: boolean } | null>;
-  subscribeScreenshot(listener: (dataUrl: string) => void): () => void;
+  subscribeScreenshot(listener: (jpeg: Uint8Array) => void): () => void;
   screenshotReady(): void;
   screenshotComplete(selection?: { x: number; y: number; width: number; height: number }): void;
   attachmentDiscard(token: string): Promise<void>;

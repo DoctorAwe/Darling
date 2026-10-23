@@ -133,7 +133,8 @@ void app.whenReady().then(() => {
   ipcMain.on('screenshot:ready', event => {
     const current = screenshotCapture;
     if (current && !current.window.isDestroyed() && event.sender.id === current.window.webContents.id) {
-      event.sender.send('screenshot:image', current.image.toDataURL()); current.window.show(); current.window.focus();
+      current.window.show(); current.window.focus();
+      setTimeout(() => { if (screenshotCapture === current && !current.window.isDestroyed()) event.sender.send('screenshot:image', current.image.toJPEG(90)); }, 0);
     }
   });
   ipcMain.on('screenshot:complete', (event, value: unknown) => {
@@ -143,13 +144,13 @@ void app.whenReady().then(() => {
   });
   ipcMain.handle('attachment:screenshot', async () => {
     if (screenshotCapture) return null;
-    window.hide(); await new Promise(resolve => setTimeout(resolve, 180));
+    window.hide(); await new Promise(resolve => setTimeout(resolve, 70));
     try {
       const display = screen.getPrimaryDisplay(); const width = Math.max(1, Math.round(display.size.width * display.scaleFactor)), height = Math.max(1, Math.round(display.size.height * display.scaleFactor));
       const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width, height }, fetchWindowIcons: false });
       const source = sources.find(value => value.display_id === String(display.id)) ?? sources[0]; if (!source || source.thumbnail.isEmpty()) throw new Error('无法截取主显示器');
-      const overlay = new BrowserWindow({ ...display.bounds, frame: false, show: false, resizable: false, movable: false, skipTaskbar: true, alwaysOnTop: true, backgroundColor: '#000000', webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
-      overlay.setMenu(null); overlay.setAlwaysOnTop(true, 'screen-saver');
+      const overlay = new BrowserWindow({ ...display.bounds, frame: false, show: false, fullscreen: true, fullscreenable: true, roundedCorners: false, thickFrame: false, hasShadow: false, resizable: false, movable: false, enableLargerThanScreen: true, skipTaskbar: true, alwaysOnTop: true, backgroundColor: '#000000', webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+      overlay.setMenu(null); overlay.setBounds(display.bounds, false); overlay.setFullScreen(true); overlay.setAlwaysOnTop(true, 'screen-saver');
       const result = new Promise<Omit<PendingAttachment, 'path' | 'data' | 'clientId'> | null>(resolve => { screenshotCapture = { window: overlay, image: source.thumbnail, resolve }; });
       overlay.on('closed', () => { if (screenshotCapture?.window === overlay) finishScreenshot(); });
       void overlay.loadFile(join(__dirname, 'renderer/index.html'), { query: { surface: 'screenshot' } }).catch(() => finishScreenshot());
