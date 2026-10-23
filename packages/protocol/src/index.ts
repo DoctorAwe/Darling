@@ -131,6 +131,7 @@ export interface DesktopApi {
   remoteAction(action: 'invite' | 'accept' | 'end', sessionId?: string, permissions?: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;
   remotePermissions(sessionId: string, permissions: { control: boolean; audio: boolean }): Promise<{ ok: boolean; error?: string }>;
   remoteIceConfig(): Promise<IceConfig>;
+  remoteCaptureSource(): Promise<string>;
   remoteSignal(signal: RemoteSignal): Promise<void>;
   remoteReady(sessionId: string): Promise<void>;
   remoteDrainSignals(sessionId: string): Promise<RemoteSignal[]>;

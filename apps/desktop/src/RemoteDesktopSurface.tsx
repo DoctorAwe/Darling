@@ -33,16 +33,20 @@ function useRemoteMedia(remote: RemoteSessionState | null | undefined, role: 'co
         }
         await pc.setRemoteDescription({ type: value.kind, sdp: value.sdp });
         if (value.kind === 'offer') {
-          // The controller renders its own zero-latency system cursor. Excluding
-          // the controlled cursor from capture avoids a delayed duplicate.
-          const videoConstraints = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 60, max: 60 }, cursor: 'never' as const };
+          // Chromium's getDisplayMedia path marks a selected Windows screen as
+          // cursor-always. Selecting the validated desktop source explicitly
+          // uses the non-embedded cursor path, leaving only the controller's
+          // immediate local system cursor visible.
+          const sourceId = await window.darling.remoteCaptureSource();
+          const desktopVideo = { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId, maxWidth: 3840, maxHeight: 2160, maxFrameRate: 60 } };
+          const desktopAudio = { mandatory: { chromeMediaSource: 'desktop' } };
           let capture: MediaStream;
-          try { capture = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: remote.permissions.audio }); }
+          try { capture = await navigator.mediaDevices.getUserMedia({ video: desktopVideo, audio: remote.permissions.audio ? desktopAudio : false } as unknown as MediaStreamConstraints); }
           catch (error) {
             report('capture', errorText(error));
             if (!remote.permissions.audio) throw error;
             setDetail('系统声音不可用，正在仅共享画面');
-            capture = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: false });
+            capture = await navigator.mediaDevices.getUserMedia({ video: desktopVideo, audio: false } as unknown as MediaStreamConstraints);
           }
           if (disposed) { capture.getTracks().forEach(track => track.stop()); return; }
           report('capture-ready', capture.getTracks().map(track => track.kind).join(','));

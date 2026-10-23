@@ -1,6 +1,11 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session as electronSession, webContents, type NativeImage } from 'electron';
 import { basename, extname, join, resolve } from 'node:path';
 import { release } from 'node:os';
+
+// Screen sharing is transported as SDR video. Force Chromium to perform its
+// Windows HDR/ICC conversion into sRGB instead of presenting the captured
+// desktop as an over-bright, washed-out SDR frame at the receiving side.
+app.commandLine.appendSwitch('force-color-profile', 'srgb');
 import { Session } from './session';
 import { MediaHost } from './media';
 import { AudioPair, AudioPreferences } from './audio-preferences';
@@ -296,6 +301,17 @@ void app.whenReady().then(() => {
     const primaryId = String(screen.getPrimaryDisplay().id);
     const primary = sources.find(source => source.display_id === primaryId) ?? sources[0]; if (!primary) return callback({});
     callback({ video: primary, ...(request.audioRequested && remote.permissions.audio ? { audio: 'loopback' as const } : {}) });
+  });
+  ipcMain.handle('remote:capture-source', async event => {
+    const remote = session.state.remote;
+    if (!remote || remote.controlled !== session.state.user || !['connecting', 'active'].includes(remote.phase) ||
+        !remoteStatusWindow || remoteStatusWindow.isDestroyed() || event.sender.id !== remoteStatusWindow.webContents.id)
+      throw new Error('当前没有可共享的远程桌面会话');
+    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false });
+    const primaryId = String(screen.getPrimaryDisplay().id);
+    const primary = sources.find(source => source.display_id === primaryId) ?? sources[0];
+    if (!primary) throw new Error('找不到主显示器');
+    return primary.id;
   });
   const syncRemoteWindows = (state: typeof session.state) => {
     const remote = state.remote; const policy = remoteWindowPolicy(remote, state.user, !!remoteControlWindow);

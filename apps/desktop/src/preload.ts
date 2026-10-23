@@ -6,6 +6,7 @@ const api: DesktopApi = {
   remoteAction: (action, sessionId, permissions) => ipcRenderer.invoke('remote:action', action, sessionId, permissions),
   remotePermissions: (sessionId, permissions) => ipcRenderer.invoke('remote:permissions', sessionId, permissions),
   remoteIceConfig: () => ipcRenderer.invoke('remote:ice'),
+  remoteCaptureSource: () => ipcRenderer.invoke('remote:capture-source'),
   remoteSignal: signal => ipcRenderer.invoke('remote:signal', signal),
   remoteReady: sessionId => ipcRenderer.invoke('remote:ready', sessionId),
   remoteDrainSignals: sessionId => ipcRenderer.invoke('remote:drain-signals', sessionId),
