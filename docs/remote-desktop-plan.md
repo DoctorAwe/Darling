@@ -28,8 +28,15 @@
 
 - 已完成协议、服务端独立状态机、信令顺序/角色/候选上限、授权更新、超时与断线清理。
 - 已完成主窗口邀请和授权 UI、控制端最大化窗口、被控端置顶状态栏及断开/权限按钮。
-- 已接入 Chromium 屏幕视频、Windows loopback 系统声音、ICE 直连优先/TURN 回退、selected candidate pair 路径识别、RTT/丢包质量和按路径调整发送码率。屏幕捕获请求只允许来自已经接受会话的被控端状态窗口。
+- 当前正式客户端仍使用 Chromium 屏幕视频；Windows loopback 系统声音、ICE 直连优先/TURN 回退、selected candidate pair 路径识别、RTT/丢包质量和按路径调整发送码率已经接入。屏幕捕获请求只允许来自已经接受会话的被控端状态窗口。
 - 控制数据通道已接入独立的 Windows `SendInput` 辅助进程；只接受白名单键盘、受限鼠标事件，并在撤权、失焦、断开和退出时释放按键。
 - 当前画面与绝对坐标明确绑定主显示器；多显示器切换留作后续扩展。
 - ICE 同时收集直连与 TURN UDP/TCP 候选；直连优先，但中继连通性检查不会等待会话超时才开始。整体协商失败清理保持 30 秒。
 - Windows 优先高性能独显与 Chromium H.264 VideoEncodeAccelerator（NVIDIA 设备通常对应 NVENC），硬件不可用时保留软件回退；实际 GPU/video_encode 状态由诊断测试核验。
+
+## 原生无光标采集迁移
+
+- 已增加基于 WebRTC Windows Graphics Capture 的 `DesktopTrackSource`，明确设置 `prefer_cursor_embedded=false`，并关闭会退回旧采集器的路径；因此不再依赖 Chromium 对桌面媒体约束的处理。
+- 已将原生桌面源接入 `darling_rtc_process --desktop-video` 的发送视频轨，并保留 `contentHint=text`。本机 2560×1600 主显示器探针实测 `mayContainCursor=false`、`trackCursorEmbedded=false`。
+- 这一步只完成原生采集和发送轨，不代表正式客户端已经切换。下一阶段需要让原生 PeerConnection 同时承载桌面视频、语音与控制 DataChannel，并把接收画面交给控制窗口；完成前不得删除 Chromium 正式链路或宣称客户端已无光标。
+- 当前原生轨使用 WebRTC 内置视频编码器工厂，尚未接入 NVENC；硬件编码能力必须以实际编码器选择和运行时统计为准。

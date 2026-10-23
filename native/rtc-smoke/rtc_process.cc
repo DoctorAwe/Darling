@@ -17,6 +17,8 @@
 #include "api/peer_connection_interface.h"
 #include "api/make_ref_counted.h"
 #include "api/stats/rtc_stats_collector_callback.h"
+#include "api/video_codecs/builtin_video_decoder_factory.h"
+#include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "rtc_base/ssl_adapter.h"
 #include "rtc_base/thread.h"
 #include "rtc_base/win32_socket_init.h"
@@ -27,6 +29,7 @@
 #include "aec3_pipeline.h"
 #include "modules/audio_device/include/audio_device_factory.h"
 #include "rtc_base/win/scoped_com_initializer.h"
+#include "desktop_track_source.h"
 
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
@@ -106,16 +109,19 @@ class Engine {
   bool synthetic_denoise = false;
   bool aec_enabled = false;
   bool aec3_enabled = false;
+  bool desktop_enabled = false;
   webrtc::scoped_refptr<webrtc::AudioProcessing> experimental_apm;
   std::shared_ptr<darling::Aec3PipelineMetrics> aec3_metrics;
   std::unique_ptr<webrtc::ScopedCOMInitializer> com;
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> device_adm;
+  webrtc::scoped_refptr<darling::DesktopTrackSource> desktop_source;
+  webrtc::scoped_refptr<webrtc::VideoTrackInterface> local_video;
   webrtc::scoped_refptr<SyntheticAudio> synthetic;
   std::shared_ptr<RnnoiseMetrics> denoise_metrics;
   std::shared_ptr<darling::AecMetrics> aec_metrics;
   bool Start() { return network->Start() && worker->Start() && signaling->Start(); }
   void Close() {
-    signaling->BlockingCall([&] { if (pc) pc->Close(); pc = nullptr; local_audio = nullptr; factory = nullptr;
+    signaling->BlockingCall([&] { if (pc) pc->Close(); pc = nullptr; local_audio = nullptr; local_video = nullptr; desktop_source = nullptr; factory = nullptr;
       peer_observer.candidates = Json::array(); peer_observer.candidate_count = 0; peer_observer.overflow = false; });
     if (synthetic) synthetic->Terminate();
     synthetic = nullptr;
@@ -150,6 +156,8 @@ class Engine {
       }
       deps.audio_encoder_factory = webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>();
       deps.audio_decoder_factory = webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>();
+      deps.video_encoder_factory = webrtc::CreateBuiltinVideoEncoderFactory();
+      deps.video_decoder_factory = webrtc::CreateBuiltinVideoDecoderFactory();
       auto apm_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
       const bool rnnoise_requested = (wasapi_enabled && audio.value("noiseSuppression", false)) || synthetic_denoise;
       if (aec3_enabled) {
@@ -231,6 +239,13 @@ class Engine {
       auto result = factory->CreatePeerConnectionOrError(config, webrtc::PeerConnectionDependencies(&peer_observer));
       if (!result.ok()) return;
       pc = result.MoveValue(); pc->SetAudioRecording(synthetic_enabled || wasapi_enabled); pc->SetAudioPlayout(synthetic_enabled || wasapi_enabled);
+      if (desktop_enabled) {
+        desktop_source = darling::DesktopTrackSource::Create();
+        if (!desktop_source) { pc->Close(); pc = nullptr; return; }
+        local_video = factory->CreateVideoTrack(desktop_source, "desktop");
+        local_video->set_content_hint(webrtc::VideoTrackInterface::ContentHint::kText);
+        if (!pc->AddTrack(local_video, {"desktop"}).ok()) { pc->Close(); pc = nullptr; return; }
+      }
       if (synthetic_enabled || wasapi_enabled) {
         webrtc::AudioOptions options;
         options.echo_cancellation = aec3_enabled; options.noise_suppression = false; options.auto_gain_control = false;
@@ -317,7 +332,7 @@ bool ServersValid(const Json& servers) {
   return true;
 }
 int main(int argc, char** argv) {
-  bool synthetic = false, wasapi = false, denoise = false, aec = false, no_aec = false, aec3 = false;
+  bool synthetic = false, wasapi = false, denoise = false, aec = false, no_aec = false, aec3 = false, desktop = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--synthetic-audio" && !synthetic) synthetic = true;
@@ -326,6 +341,7 @@ int main(int argc, char** argv) {
     else if (arg == "--aec" && !aec) aec = true;
     else if (arg == "--aec3-experimental" && !aec3) aec3 = true;
     else if (arg == "--no-aec" && !no_aec) no_aec = true;
+    else if (arg == "--desktop-video" && !desktop) desktop = true;
     else return 6;
   }
   if ((synthetic && wasapi) || (aec && no_aec) || (aec3 && (aec || no_aec)) || (denoise && !synthetic) ||
@@ -340,6 +356,7 @@ int main(int argc, char** argv) {
     engine.wasapi_enabled = wasapi;
     engine.aec_enabled = !no_aec && (wasapi || aec || aec3);
     engine.aec3_enabled = aec3;
+    engine.desktop_enabled = desktop;
     if (!engine.Start()) std::quick_exit(2);
     bool ready = false;
     std::string line;
@@ -359,7 +376,7 @@ int main(int argc, char** argv) {
         response = {{"engineVersion", "0.4.2-aec3-experimental"}, {"aec", engine.aec_enabled},
           {"aecAlgorithm", !engine.aec_enabled ? "none" : engine.aec3_enabled ? "webrtc-aec3" : "darling-pbfdaf-v2"},
           {"negotiationOnly", !engine.synthetic_enabled && !engine.wasapi_enabled},
-          {"syntheticAudio", engine.synthetic_enabled}, {"wasapiAudio", engine.wasapi_enabled}, {"rtc", false}, {"capture", false}, {"playback", false}};
+          {"syntheticAudio", engine.synthetic_enabled}, {"wasapiAudio", engine.wasapi_enabled}, {"desktopVideo", engine.desktop_enabled}, {"desktopCursorEmbedded", false}, {"rtc", false}, {"capture", false}, {"playback", false}};
       } else if (!ready) error = "HANDSHAKE_REQUIRED";
       else if (type == "engine.shutdown") { engine.Close(); shutdown = true; }
       else if (!String(payload, "callId", 36) || !Uuid(payload["callId"]) || payload.value("generation", Json()) != 1) error = "INVALID_SCOPE";
@@ -368,6 +385,7 @@ int main(int argc, char** argv) {
         response = {{"callId", id}, {"generation", 1}};
         if (type == "rtc.open") {
           if (!String(payload, "role", 6) || (payload["role"] != "caller" && payload["role"] != "callee")) error = "INVALID_ROLE";
+          else if (engine.desktop_enabled && payload["role"] != "callee") error = "DESKTOP_VIDEO_REQUIRES_CALLEE";
           else if (payload.contains("iceMode") && payload["iceMode"] != "direct" && payload["iceMode"] != "disabled" && payload["iceMode"] != "relay") error = "INVALID_ICE_MODE";
           else if (!ServersValid(payload.value("iceServers", Json::array()))) error = "INVALID_ICE_SERVERS";
           else if (payload.value("iceMode", Json()) == "relay" && payload.value("iceServers", Json::array()).empty()) error = "ICE_SERVERS_REQUIRED";
