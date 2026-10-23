@@ -44,6 +44,7 @@ function App() {
   };
   const messages = useRef<HTMLDivElement>(null);
   const keepMessagesAtBottom = useRef(true);
+  const initialHistoryAnchored = useRef(false);
   useEffect(() => {
     let received = false;
     const off = window.darling.subscribe(next => { received = true; setState(next); });
@@ -51,10 +52,16 @@ function App() {
     return off;
   }, []);
   useLayoutEffect(() => {
-    const element = messages.current; if (!element || !keepMessagesAtBottom.current) return;
+    const element = messages.current; if (!element || (initialHistoryAnchored.current && !keepMessagesAtBottom.current)) return;
     const scroll = () => { element.scrollTop = element.scrollHeight; };
-    scroll(); const frame = requestAnimationFrame(scroll); return () => cancelAnimationFrame(frame);
-  }, [state.messages.length, state.pending.length]);
+    scroll();
+    const frame = requestAnimationFrame(() => requestAnimationFrame(() => {
+      scroll();
+      if (state.status === 'online' && state.detail.includes('文字聊天就绪')) initialHistoryAnchored.current = true;
+    }));
+    const timer = setTimeout(scroll, 80);
+    return () => { cancelAnimationFrame(frame); clearTimeout(timer); };
+  }, [state.messages.length, state.pending.length, state.status, state.detail]);
   useEffect(() => {
     const element = messages.current; if (!element) return;
     const observer = new ResizeObserver(() => { if (keepMessagesAtBottom.current) element.scrollTop = element.scrollHeight; });
@@ -101,7 +108,7 @@ function App() {
     {state.remote && ['connecting', 'active'].includes(state.remote.phase) && <div className="remote-main-status"><span className="remote-live-dot"/>远程桌面{state.remote.phase === 'active' ? '已连接' : '正在连接'}<button onClick={() => remoteAction('end')}>断开</button></div>}
     {state.status !== 'online' && <div className={`connection ${state.status}`}><i className="dot"/><span>{state.detail}</span><button onClick={() => void window.darling.reload()}>重试</button></div>}
     {(state.status === 'error' || state.status === 'replaced') && <div className="config-path">配置文件：{state.configPath}</div>}
-    <div className="workspace" data-module="chat"><div ref={messages} className="messages" aria-live="polite" onScroll={event => { const element = event.currentTarget; keepMessagesAtBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 96; }}>{state.messages.length === 0 && state.pending.length === 0 && <div className="empty"><Avatar user={peer}/><h2>{names[peer]}</h2><p>发一条消息，开始聊天</p></div>}
+    <div className="workspace" data-module="chat"><div ref={messages} className="messages" aria-live="polite" onScroll={event => { if (!initialHistoryAnchored.current) return; const element = event.currentTarget; keepMessagesAtBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 96; }}>{state.messages.length === 0 && state.pending.length === 0 && <div className="empty"><Avatar user={peer}/><h2>{names[peer]}</h2><p>发一条消息，开始聊天</p></div>}
     {state.messages.map(m => <article className={`message ${m.sender === self ? 'mine' : ''}`} key={m.id}><Avatar user={m.sender} small/><div className="message-content"><div className="message-meta">{names[m.sender]}<time>{new Date(m.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></div>{m.attachment ? <AttachmentMessage attachment={m.attachment}/> : <div className="bubble">{m.text}</div>}</div></article>)}
     {state.pending.map(m => <article className="message mine" key={m.clientId}><Avatar user={self} small/><div className="message-content"><div className="bubble pending">{m.text}</div><div className="delivery">{state.status === 'online' ? '发送中…' : '等待重连'}</div></div></article>)}<div/></div></div>
     <div className="composer">{attachments.length > 0 && <div className="pending-attachments">{attachments.map(item => <div key={item.token}><span className="file-type small">{item.image ? 'IMG' : (item.name.split('.').pop()?.slice(0, 4).toUpperCase() || 'FILE')}</span><span>{item.name}</span><button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.token)}>×</button></div>)}</div>}<div className="compose-box"><div className="attachment-trigger" ref={attachmentTrigger}><button className="plus" aria-label="添加附件" aria-expanded={attachmentMenu} onClick={() => setAttachmentMenu(value => !value)}><Icon name="plus"/></button>{attachmentMenu && <div className="attachment-menu"><button onClick={pickAttachments}><Icon name="file"/><span><strong>上传文件</strong><small>图片或其他文件</small></span></button><button onClick={takeScreenshot}><Icon name="camera"/><span><strong>截图</strong><small>框选主显示器区域</small></span></button></div>}</div><textarea aria-label="聊天消息" placeholder={`发送消息给 ${names[peer]}…`} value={draft} maxLength={8000} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><button className="send" disabled={(!draft.trim() && attachments.length === 0) || sending || !state.user || ['error', 'replaced'].includes(state.status)} onClick={() => void send()} aria-label="发送"><Icon name="send"/></button></div><div className="compose-footer"><span>{error || (sending ? '正在发送…' : 'Enter 发送 · Shift + Enter 换行')}</span></div></div></main></div>
