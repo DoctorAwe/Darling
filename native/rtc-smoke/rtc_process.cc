@@ -1,5 +1,6 @@
 // Diagnostic RTC prototype. No physical audio devices; synthetic PCM is opt-in.
 #include <chrono>
+#include <deque>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -23,6 +24,7 @@
 #include "rtc_base/thread.h"
 #include "rtc_base/win32_socket_init.h"
 #include "api/audio_options.h"
+#include "api/data_channel_interface.h"
 #include "synthetic_audio.h"
 #include "rnnoise_processing.h"
 #include "capture_chain.h"
@@ -33,13 +35,50 @@
 
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
-class Observer : public webrtc::PeerConnectionObserver {
+class Observer : public webrtc::PeerConnectionObserver,
+                 public webrtc::DataChannelObserver {
  public:
   Json candidates = Json::array();
   int candidate_count = 0;
   bool overflow = false;
   void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState) override {}
-  void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>) override {}
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> control;
+  std::deque<std::string> control_messages;
+  bool control_overflow = false;
+  void AttachControl(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
+    if (!channel || channel->label() != "control" || control) return;
+    control = std::move(channel);
+    control->RegisterObserver(this);
+  }
+  void ResetControl() {
+    if (control) control->UnregisterObserver();
+    control = nullptr;
+    control_messages.clear();
+    control_overflow = false;
+  }
+  bool SendControl(const std::string& message) {
+    return control && control->state() == webrtc::DataChannelInterface::kOpen &&
+           control->buffered_amount() <= 1024 * 1024 &&
+           control->Send(webrtc::DataBuffer(message));
+  }
+  const char* ControlState() const {
+    return control ? webrtc::DataChannelInterface::DataStateString(control->state()) : "unavailable";
+  }
+  void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) override {
+    AttachControl(std::move(channel));
+  }
+  void OnStateChange() override {}
+  void OnMessage(const webrtc::DataBuffer& buffer) override {
+    if (buffer.binary || buffer.size() == 0 || buffer.size() > 4096) {
+      control_overflow = true;
+      return;
+    }
+    if (control_messages.size() >= 64) {
+      control_overflow = true;
+      return;
+    }
+    control_messages.emplace_back(reinterpret_cast<const char*>(buffer.data.cdata()), buffer.size());
+  }
   void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState) override {}
   void OnIceCandidate(const webrtc::IceCandidate* candidate) override {
     auto value = candidate->ToString();
@@ -110,6 +149,7 @@ class Engine {
   bool aec_enabled = false;
   bool aec3_enabled = false;
   bool desktop_enabled = false;
+  bool control_enabled = false;
   webrtc::scoped_refptr<webrtc::AudioProcessing> experimental_apm;
   std::shared_ptr<darling::Aec3PipelineMetrics> aec3_metrics;
   std::unique_ptr<webrtc::ScopedCOMInitializer> com;
@@ -121,7 +161,7 @@ class Engine {
   std::shared_ptr<darling::AecMetrics> aec_metrics;
   bool Start() { return network->Start() && worker->Start() && signaling->Start(); }
   void Close() {
-    signaling->BlockingCall([&] { if (pc) pc->Close(); pc = nullptr; local_audio = nullptr; local_video = nullptr; desktop_source = nullptr; factory = nullptr;
+    signaling->BlockingCall([&] { peer_observer.ResetControl(); if (pc) pc->Close(); pc = nullptr; local_audio = nullptr; local_video = nullptr; desktop_source = nullptr; factory = nullptr;
       peer_observer.candidates = Json::array(); peer_observer.candidate_count = 0; peer_observer.overflow = false; });
     if (synthetic) synthetic->Terminate();
     synthetic = nullptr;
@@ -239,6 +279,13 @@ class Engine {
       auto result = factory->CreatePeerConnectionOrError(config, webrtc::PeerConnectionDependencies(&peer_observer));
       if (!result.ok()) return;
       pc = result.MoveValue(); pc->SetAudioRecording(synthetic_enabled || wasapi_enabled); pc->SetAudioPlayout(synthetic_enabled || wasapi_enabled);
+      if (control_enabled && requested_role == "caller") {
+        webrtc::DataChannelInit init;
+        init.ordered = true;
+        auto channel = pc->CreateDataChannelOrError("control", &init);
+        if (!channel.ok()) { pc->Close(); pc = nullptr; return; }
+        peer_observer.AttachControl(channel.MoveValue());
+      }
       if (desktop_enabled) {
         desktop_source = darling::DesktopTrackSource::Create();
         if (!desktop_source) { pc->Close(); pc = nullptr; return; }
@@ -332,7 +379,7 @@ bool ServersValid(const Json& servers) {
   return true;
 }
 int main(int argc, char** argv) {
-  bool synthetic = false, wasapi = false, denoise = false, aec = false, no_aec = false, aec3 = false, desktop = false;
+  bool synthetic = false, wasapi = false, denoise = false, aec = false, no_aec = false, aec3 = false, desktop = false, control = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--synthetic-audio" && !synthetic) synthetic = true;
@@ -342,6 +389,7 @@ int main(int argc, char** argv) {
     else if (arg == "--aec3-experimental" && !aec3) aec3 = true;
     else if (arg == "--no-aec" && !no_aec) no_aec = true;
     else if (arg == "--desktop-video" && !desktop) desktop = true;
+    else if (arg == "--control-data" && !control) control = true;
     else return 6;
   }
   if ((synthetic && wasapi) || (aec && no_aec) || (aec3 && (aec || no_aec)) || (denoise && !synthetic) ||
@@ -357,6 +405,7 @@ int main(int argc, char** argv) {
     engine.aec_enabled = !no_aec && (wasapi || aec || aec3);
     engine.aec3_enabled = aec3;
     engine.desktop_enabled = desktop;
+    engine.control_enabled = control;
     if (!engine.Start()) std::quick_exit(2);
     bool ready = false;
     std::string line;
@@ -376,7 +425,7 @@ int main(int argc, char** argv) {
         response = {{"engineVersion", "0.4.2-aec3-experimental"}, {"aec", engine.aec_enabled},
           {"aecAlgorithm", !engine.aec_enabled ? "none" : engine.aec3_enabled ? "webrtc-aec3" : "darling-pbfdaf-v2"},
           {"negotiationOnly", !engine.synthetic_enabled && !engine.wasapi_enabled},
-          {"syntheticAudio", engine.synthetic_enabled}, {"wasapiAudio", engine.wasapi_enabled}, {"desktopVideo", engine.desktop_enabled}, {"desktopCursorEmbedded", false}, {"rtc", false}, {"capture", false}, {"playback", false}};
+          {"syntheticAudio", engine.synthetic_enabled}, {"wasapiAudio", engine.wasapi_enabled}, {"desktopVideo", engine.desktop_enabled}, {"desktopCursorEmbedded", false}, {"controlData", engine.control_enabled}, {"rtc", false}, {"capture", false}, {"playback", false}};
       } else if (!ready) error = "HANDSHAKE_REQUIRED";
       else if (type == "engine.shutdown") { engine.Close(); shutdown = true; }
       else if (!String(payload, "callId", 36) || !Uuid(payload["callId"]) || payload.value("generation", Json()) != 1) error = "INVALID_SCOPE";
@@ -415,6 +464,12 @@ int main(int argc, char** argv) {
               if (track && track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind)
                 track->set_enabled(!payload["speakerMuted"].get<bool>());
             }
+          });
+        }
+        else if (type == "rtc.data.send") {
+          if (!engine.control_enabled || !String(payload, "message", 4096)) error = "INVALID_DATA_MESSAGE";
+          else engine.signaling->BlockingCall([&] {
+            if (!engine.peer_observer.SendControl(payload["message"])) error = "DATA_CHANNEL_NOT_OPEN";
           });
         }
         else if (type == "rtc.stats") {
@@ -467,11 +522,18 @@ int main(int argc, char** argv) {
         else if (type == "rtc.poll") {
           engine.signaling->BlockingCall([&] {
             if (engine.peer_observer.overflow) { error = "ICE_LIMIT"; return; }
+            if (engine.peer_observer.control_overflow) { error = "DATA_LIMIT"; return; }
             response["candidates"] = Json::array();
             auto& queue = engine.peer_observer.candidates;
             const size_t count = queue.size() < 16 ? queue.size() : 16;
             for (size_t i = 0; i < count; ++i) response["candidates"].push_back(queue[i]);
             queue.erase(queue.begin(), queue.begin() + count);
+            response["dataState"] = engine.peer_observer.ControlState();
+            response["messages"] = Json::array();
+            auto& messages = engine.peer_observer.control_messages;
+            const size_t message_count = messages.size() < 16 ? messages.size() : 16;
+            for (size_t i = 0; i < message_count; ++i) response["messages"].push_back(messages[i]);
+            messages.erase(messages.begin(), messages.begin() + message_count);
             response["connectionState"] = webrtc::PeerConnectionInterface::AsString(engine.pc->peer_connection_state());
             response["iceState"] = webrtc::PeerConnectionInterface::AsString(engine.pc->ice_connection_state());
           });

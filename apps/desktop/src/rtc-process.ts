@@ -16,12 +16,12 @@ export type DeviceAudio = z.infer<typeof DeviceAudio>;
 const base = { protocolVersion: z.literal(1), requestId: z.string().uuid() };
 const Ice = z.object({ kind: z.literal('ice'), candidate: z.string().max(2048), sdpMid: z.string().max(256), sdpMLineIndex: z.number().int().min(0).max(255) });
 const Packet = z.discriminatedUnion('type', [
-  z.object({ ...base, type: z.literal('engine.ready'), payload: z.object({ engineVersion: z.string(), aecAlgorithm: z.enum(['none', 'webrtc-aec3', 'darling-pbfdaf-v2']).optional(), negotiationOnly: z.boolean(), syntheticAudio: z.boolean().default(false), wasapiAudio: z.boolean().default(false), rtc: z.literal(false), capture: z.literal(false), playback: z.literal(false) }) }),
+  z.object({ ...base, type: z.literal('engine.ready'), payload: z.object({ engineVersion: z.string(), aecAlgorithm: z.enum(['none', 'webrtc-aec3', 'darling-pbfdaf-v2']).optional(), negotiationOnly: z.boolean(), syntheticAudio: z.boolean().default(false), wasapiAudio: z.boolean().default(false), desktopVideo: z.boolean().default(false), desktopCursorEmbedded: z.boolean().default(true), controlData: z.boolean().default(false), rtc: z.literal(false), capture: z.literal(false), playback: z.literal(false) }) }),
   z.object({ ...base, type: z.literal('engine.error'), payload: z.object({ code: z.string().max(128) }) }),
   z.object({ ...base, type: z.literal('rtc.ok'), payload: Scope }),
   z.object({ ...base, type: z.literal('rtc.stats'), payload: Scope.extend({ stats: z.array(z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))).max(32) }) }),
   z.object({ ...base, type: z.literal('rtc.description'), payload: RtcSignal }),
-  z.object({ ...base, type: z.literal('rtc.events'), payload: Scope.extend({ candidates: z.array(Ice).max(16), connectionState: z.enum(['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']), iceState: z.string().optional() }) }),
+  z.object({ ...base, type: z.literal('rtc.events'), payload: Scope.extend({ candidates: z.array(Ice).max(16), connectionState: z.enum(['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']), iceState: z.string().optional(), dataState: z.enum(['unavailable', 'connecting', 'open', 'closing', 'closed']).default('unavailable'), messages: z.array(z.string().min(1).max(4096)).max(16).default([]) }) }),
 ]);
 type Packet = z.infer<typeof Packet>;
 
@@ -93,6 +93,10 @@ export class RtcProcessHost extends EventEmitter {
       const wasapi = !!this.deviceAudio;
       if (hello.type !== 'engine.ready' || hello.payload.syntheticAudio !== synthetic || hello.payload.wasapiAudio !== wasapi || hello.payload.negotiationOnly !== !(synthetic || wasapi))
         throw new Error('Invalid RTC handshake');
+      if (this.args.includes('--desktop-video') && (!hello.payload.desktopVideo || hello.payload.desktopCursorEmbedded))
+        throw new Error('Cursor-free native desktop source required');
+      if (this.args.includes('--control-data') !== hello.payload.controlData)
+        throw new Error('Native control data channel mismatch');
       if (this.args.includes('--aec3-experimental') && hello.payload.aecAlgorithm !== 'webrtc-aec3')
         throw new Error('Experimental AEC3 engine required');
       if ((await this.request('rtc.open', { ...this.scope, role: this.role, iceMode: this.iceMode, iceServers: this.iceMode === 'relay' ? this.iceConfig!.iceServers : [], ...(this.deviceAudio ? { deviceAudio: this.deviceAudio } : {}) })).type !== 'rtc.ok') throw new Error('RTC open failed');
@@ -149,6 +153,8 @@ export class RtcProcessHost extends EventEmitter {
       }
       this.emit('connection', packet.payload.connectionState);
       this.emit('ice-state', packet.payload.iceState);
+      this.emit('data-state', packet.payload.dataState);
+      for (const message of packet.payload.messages) this.emit('data', message);
       if (packet.payload.connectionState === 'failed') this.fail('ICE/DTLS connection failed');
     }).catch(() => this.fail('RTC event polling failed')).finally(() => {
       this.polling = false;
@@ -164,6 +170,11 @@ export class RtcProcessHost extends EventEmitter {
     if (typeof micMuted !== 'boolean' || typeof speakerMuted !== 'boolean') throw new Error('Invalid mute state');
     const packet = await this.request('rtc.audio', { ...this.scope, micMuted, speakerMuted });
     if (packet.type !== 'rtc.ok') throw new Error('Audio control failed');
+  }
+  async sendData(message: string) {
+    if (typeof message !== 'string' || message.length === 0 || Buffer.byteLength(message) > 4096) throw new Error('Invalid data message');
+    const packet = await this.request('rtc.data.send', { ...this.scope, message });
+    if (packet.type !== 'rtc.ok') throw new Error('Data channel send failed');
   }
   private request(type: string, payload: object = {}): Promise<Packet> {
     if (this.closed || !this.child || this.child.stdin.destroyed) return Promise.reject(new Error('RTC host closed'));

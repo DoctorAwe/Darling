@@ -134,13 +134,15 @@ test('diagnostic coordinator routes native SDP and removes listeners on dispose'
 test('native direct ICE/DTLS connects two local dummy-audio peers', { skip: process.env.DARLING_TEST_RTC_DIRECT !== '1', timeout: 30000 }, async () => {
   const executable = resolve('.local/webrtc/src/out/DarlingRelease/darling_rtc_process.exe');
   const scope = { callId: randomUUID(), generation: 1 as const };
-  const a = new RtcProcessHost(executable, scope, 'caller', [], 15000, 'direct');
-  const b = new RtcProcessHost(executable, scope, 'callee', [], 15000, 'direct');
+  const a = new RtcProcessHost(executable, scope, 'caller', ['--control-data'], 15000, 'direct');
+  const b = new RtcProcessHost(executable, scope, 'callee', ['--control-data'], 15000, 'direct');
   let aState = '', bState = '', candidates = 0;
+  let aData = '', bData = '';
   let aIce = '', bIce = '';
   const descriptions: string[] = [];
   const candidateKinds: string[] = [];
   a.on('ice-state', value => { aIce = value; }); b.on('ice-state', value => { bIce = value; });
+  a.on('data-state', value => { aData = value; }); b.on('data-state', value => { bData = value; });
   const errors: unknown[] = [];
   a.on('connection', value => { aState = value; }); b.on('connection', value => { bState = value; });
   for (const [from, to] of [[a, b], [b, a]]) {
@@ -167,6 +169,11 @@ test('native direct ICE/DTLS connects two local dummy-audio peers', { skip: proc
       stats = { a: await a.diagnosticStats(), b: await b.diagnosticStats() };
     }
     assert.equal(aState, 'connected', JSON.stringify({ aState, bState, aIce, bIce, candidates, candidateKinds, descriptions, stats })); assert.equal(bState, 'connected');
+    for (let i = 0; i < 200 && (aData !== 'open' || bData !== 'open'); ++i) await new Promise(r => setTimeout(r, 10));
+    assert.equal(aData, 'open'); assert.equal(bData, 'open');
+    const received = once(b, 'data');
+    await a.sendData('{"type":"release"}');
+    assert.equal((await received)[0], '{"type":"release"}');
     assert.ok(candidateKinds.some(value => value.startsWith('udp:')), 'must gather UDP candidates');
     for (const peer of [stats.a, stats.b]) {
       assert.ok(peer.some(value => value.type === 'candidate-pair' && value.state === 'succeeded' && value.nominated === true));
