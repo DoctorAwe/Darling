@@ -74,3 +74,25 @@ index 5bbc5b7..4ba00f9 100644
    # TODO(bugs.webrtc.org/430260876): Compile webrtc lib with rust once toolchain
    # is working.
    if (rtc_include_tests && !is_asan && !rtc_rusty_base64) {
+diff --git a/modules/audio_device/win/core_audio_base_win.cc b/modules/audio_device/win/core_audio_base_win.cc
+index e1f2f48..f264a09 100644
+--- a/modules/audio_device/win/core_audio_base_win.cc
++++ b/modules/audio_device/win/core_audio_base_win.cc
+@@ -536,4 +536,17 @@ bool CoreAudioBase::Init() {
+   RTC_DCHECK_EQ(state, AudioSessionStateInactive);
++  // Darling keeps other applications at their chosen volume during calls.
++  // Preserve the Communications category (and its voice-oriented device
++  // behavior), but opt the render session out of Windows communications
++  // ducking before the session becomes active.
++  if (IsOutput()) {
++    ComPtr<IAudioSessionControl2> audio_session_control2;
++    if (FAILED(audio_session_control.As(&audio_session_control2)) ||
++        FAILED(audio_session_control2->SetDuckingPreference(TRUE))) {
++      RTC_LOG(LS_ERROR) << "Failed to disable communications ducking";
++      return false;
++    }
++  }
++
+   // Register the client to receive notifications of session events, including
+   // changes in the stream state.
+   if (FAILED(audio_session_control->RegisterAudioSessionNotification(this))) {

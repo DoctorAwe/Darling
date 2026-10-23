@@ -22,7 +22,7 @@ for (const user of ['dva', 'mercy']) {
   const crt = process.env.DARLING_CRT_DIR ?? 'C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT';
   for (const dll of readdirSync(crt).filter(file => file.endsWith('.dll'))) cpSync(join(crt, dll), join(application, 'dist/native', dll));
   writeFileSync(join(application, 'dist/voice-beta.flag'), 'Private voice beta; explicit device confirmation required.\n');
-  writeFileSync(join(application, 'package.json'), JSON.stringify({ name: `darling-${user}-voice-beta`, productName: name, version: '0.8.0-beta.5', main: 'dist/main.cjs' }, null, 2));
+  writeFileSync(join(application, 'package.json'), JSON.stringify({ name: `darling-${user}-voice-beta`, productName: name, version: '0.8.0-beta.6', main: 'dist/main.cjs' }, null, 2));
   const config = JSON.parse(readFileSync(join(root, `.local/${user}.config.json`), 'utf8'));
   if (config.auth?.username !== user) throw new Error('Account config mismatch');
   writeFileSync(join(application, 'config.json'), JSON.stringify(config, null, 2));
@@ -50,5 +50,5 @@ for (const user of ['dva', 'mercy']) {
   }
   console.log(`Packaged ${name}: ${destination}`);
 }
-writeFileSync(join(release, 'build-info.json'), JSON.stringify({ builtAt: new Date().toISOString(), version: '0.8.0-beta.5', aec: 'official-webrtc-aec3', residualEchoSuppression: true, fallbackAec: 'darling-pbfdaf-v2', headphonesAec: true, noiseSuppression: 'rnnoise-v0.2', webrtcNoiseSuppression: false, accounts: ['dva', 'mercy'], voiceTransport: 'TURN relay', remoteDesktop: { video: true, systemAudio: true, input: true, route: 'direct-and-turn-concurrent', preferredCodec: 'h264-hardware', discreteGpuPreferred: true, primaryDisplay: true, negotiationTimeoutSeconds: 30, localCursor: true, capturedCursor: false }, attachments: { maxBytes: 134217728, maxSelection: 10, imagePreview: true, screenshot: 'primary-display-region-selection', hidesMainWindow: true, fullScreenSelector: true }, mediaMutualExclusion: true, voiceTrackResetOnConnect: true, maxCallMinutes: null, audioControls: true }, null, 2));
+writeFileSync(join(release, 'build-info.json'), JSON.stringify({ builtAt: new Date().toISOString(), version: '0.8.0-beta.6', aec: 'official-webrtc-aec3', residualEchoSuppression: true, fallbackAec: 'darling-pbfdaf-v2', headphonesAec: true, noiseSuppression: 'rnnoise-v0.2', webrtcNoiseSuppression: false, windowsCommunicationsDucking: false, accounts: ['dva', 'mercy'], voiceTransport: 'TURN relay', remoteDesktop: { video: true, systemAudio: true, input: true, route: 'direct-and-turn-concurrent', preferredCodec: 'h264-hardware', discreteGpuPreferred: true, primaryDisplay: true, negotiationTimeoutSeconds: 30, localCursor: true, capturedCursor: false }, attachments: { maxBytes: 134217728, maxSelection: 10, imagePreview: true, screenshot: 'primary-display-region-selection', hidesMainWindow: true, fullScreenSelector: true }, mediaMutualExclusion: true, voiceTrackResetOnConnect: true, maxCallMinutes: null, audioControls: true }, null, 2));
 console.log(`Release directory: ${release}`);
