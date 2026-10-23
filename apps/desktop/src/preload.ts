@@ -15,6 +15,7 @@ const api: DesktopApi = {
   rtcDeviceStop: () => ipcRenderer.invoke('rtc-device:stop'),
   snapshot: () => ipcRenderer.invoke('session:snapshot'),
   send: text => ipcRenderer.invoke('session:send', text),
+  groupSend: text => ipcRenderer.invoke('group:send', text),
   attachmentPick: () => ipcRenderer.invoke('attachment:pick'),
   attachmentScreenshot: () => ipcRenderer.invoke('attachment:screenshot'),
   subscribeScreenshot: listener => {

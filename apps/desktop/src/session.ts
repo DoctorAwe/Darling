@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { z } from 'zod';
-import { ClientConfig, RemoteSignal, ServerPacket, Text, User, type ClientPacket, type Message, type PendingMessage, type Snapshot } from '../../../packages/protocol/src/index';
+import { ClientConfig, RemoteSignal, ServerPacket, Text, User, type ClientPacket, type GroupMessage, type Message, type PendingMessage, type Snapshot } from '../../../packages/protocol/src/index';
 import type { IceConfig } from '../../../packages/protocol/src/index';
 import { RtcSignaling } from './rtc-signaling';
 
@@ -59,6 +59,8 @@ export class Session extends EventEmitter {
   private stopped = false;
   private cursor = 0;
   private syncRequest?: string;
+  private groupCursor = 0;
+  private groupSyncRequest?: string;
   private inflight = new Map<string, { clientId: string; at: number }>();
   private outboxPath = '';
   private ice?: IceConfig;
@@ -80,7 +82,7 @@ export class Session extends EventEmitter {
     super();
     this.rtc.on('signal', signal => this.emit('rtc.signal', signal));
     this.rtc.on('closed', scope => this.emit('rtc.closed', scope));
-    this.state = { status: 'connecting', online: [], messages: [], pending: [], detail: '正在读取配置', configPath, mediaAvailable: false };
+    this.state = { status: 'connecting', online: [], messages: [], pending: [], groupMessages: [], detail: '正在读取配置', configPath, mediaAvailable: false };
   }
   private emitState() { this.emit('state', structuredClone(this.state)); }
   private persist() {
@@ -89,8 +91,8 @@ export class Session extends EventEmitter {
     renameSync(this.outboxPath + '.tmp', this.outboxPath);
   }
   start() {
-    this.stop(); this.stopped = false; this.attempts = 0; this.cursor = 0;
-    this.state.messages = []; this.state.pending = []; this.state.online = []; this.state.user = undefined;
+    this.stop(); this.stopped = false; this.attempts = 0; this.cursor = 0; this.groupCursor = 0;
+    this.state.messages = []; this.state.pending = []; this.state.groupMessages = []; this.state.online = []; this.state.user = undefined;
     try {
       this.config = ClientConfig.parse(JSON.parse(readFileSync(this.state.configPath, 'utf8')));
       this.state.user = this.config.auth.username;
@@ -111,7 +113,7 @@ export class Session extends EventEmitter {
     this.stopped = true; this.generation++;
     clearTimeout(this.timer); clearInterval(this.watchdog);
     this.socket?.removeAllListeners(); this.socket?.on('error', () => {}); this.socket?.terminate();
-    this.socket = undefined; this.syncRequest = undefined; this.inflight.clear();
+    this.socket = undefined; this.syncRequest = undefined; this.groupSyncRequest = undefined; this.inflight.clear();
   }
   private connect() {
     if (this.stopped || !this.config) return;
@@ -139,6 +141,7 @@ export class Session extends EventEmitter {
         clearTimeout(loginDeadline); this.attempts = 0;
         this.state.status = 'online'; this.state.detail = '已连接 · 消息同步中';
         this.requestSync();
+        this.requestGroupSync();
         this.requestCall('call.sync', {});
         this.requestRemote('remote.sync', {});
       } else if (packet.type === 'rtc.config') { this.ice = packet.payload; this.emit('ice.updated', packet.requestId); return; }
@@ -179,6 +182,14 @@ export class Session extends EventEmitter {
         this.cursor = packet.payload.next;
         if (packet.payload.hasMore) this.requestSync();
         else { this.state.detail = '已连接 · 文字聊天就绪'; this.flush(); }
+      } else if (packet.type === 'group.message.stored') {
+        this.mergeGroup(packet.payload);
+      } else if (packet.type === 'group.message.page') {
+        if (packet.requestId !== this.groupSyncRequest) return;
+        this.groupSyncRequest = undefined;
+        for (const message of packet.payload.messages) this.mergeGroup(message);
+        this.groupCursor = packet.payload.next;
+        if (packet.payload.hasMore) this.requestGroupSync();
       } else if (packet.type === 'error') {
         if (packet.requestId && this.rtc.reject(packet.requestId, packet.payload.message)) return;
         if (packet.requestId && packet.requestId === this.remoteRequest?.id) {
@@ -197,7 +208,7 @@ export class Session extends EventEmitter {
       clearTimeout(loginDeadline);
       if (generation !== this.generation) return;
       this.rtc.clear();
-      clearInterval(this.watchdog); this.inflight.clear(); this.syncRequest = undefined;
+      clearInterval(this.watchdog); this.inflight.clear(); this.syncRequest = undefined; this.groupSyncRequest = undefined;
       this.clearCallRequest(); this.clearRemoteRequest(); this.state.call = null; this.state.callError = undefined; this.state.remote = null; this.state.remoteError = undefined;
       this.state.online = [];
       this.ice = undefined;
@@ -279,6 +290,16 @@ export class Session extends EventEmitter {
     this.syncRequest = randomUUID();
     this.transmit({ version: 1, type: 'message.sync', requestId: this.syncRequest, payload: { after: this.cursor } });
   }
+  private requestGroupSync() {
+    this.groupSyncRequest = randomUUID();
+    this.transmit({ version: 1, type: 'group.sync', requestId: this.groupSyncRequest, payload: { groupId: 'dva-mercy-echo', after: this.groupCursor } });
+  }
+  private mergeGroup(message: GroupMessage) {
+    const messages = this.state.groupMessages ??= [];
+    if (!messages.some(value => value.id === message.id)) {
+      messages.push(message); messages.sort((a, b) => a.seq - b.seq);
+    }
+  }
   private merge(message: Message) {
     if (!this.state.messages.some(m => m.id === message.id)) {
       this.state.messages.push(message); this.state.messages.sort((a, b) => a.seq - b.seq);
@@ -297,6 +318,13 @@ export class Session extends EventEmitter {
     this.state.pending.push(message);
     try { this.persist(); } catch { this.state.pending.pop(); return { ok: false, error: '无法保存待发消息，请检查目录权限' }; }
     this.flush(); this.emitState(); return { ok: true };
+  }
+  groupSend(text: string): { ok: boolean; error?: string } {
+    const parsed = Text.safeParse(text);
+    if (!parsed.success) return { ok: false, error: '消息不能为空，最多 8000 字符' };
+    if (!this.state.user || this.stopped || this.state.status !== 'online' || this.socket?.readyState !== WebSocket.OPEN) return { ok: false, error: '请先连接服务器' };
+    this.transmit({ version: 1, type: 'group.message.send', requestId: randomUUID(), payload: { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: parsed.data } });
+    return { ok: true };
   }
   private flush() {
     if (this.state.status !== 'online' || this.syncRequest) return;

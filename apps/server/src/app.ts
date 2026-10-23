@@ -153,10 +153,16 @@ export async function createServer(options: { database: string; users: Record<Us
       try {
         if (packet.type === 'message.sync') {
           send(socket, { version: 1, type: 'message.page', requestId: packet.requestId, payload: store.page(packet.payload.after) });
-        } else {
+        } else if (packet.type === 'message.send') {
           const result = store.save(user, packet.payload.clientId, packet.payload.text);
           send(socket, { version: 1, type: 'message.stored', requestId: packet.requestId, payload: result.message });
           if (result.inserted) for (const peer of sessions.values()) if (peer !== socket) send(peer, { version: 1, type: 'message.stored', payload: result.message });
+        } else if (packet.type === 'group.sync') {
+          send(socket, { version: 1, type: 'group.message.page', requestId: packet.requestId, payload: store.groupPage(packet.payload.groupId, packet.payload.after) });
+        } else if (packet.type === 'group.message.send') {
+          const result = store.saveGroup(packet.payload.groupId, user, packet.payload.clientId, packet.payload.text);
+          send(socket, { version: 1, type: 'group.message.stored', requestId: packet.requestId, payload: result.message });
+          if (result.inserted) for (const peer of sessions.values()) if (peer !== socket) send(peer, { version: 1, type: 'group.message.stored', payload: result.message });
         }
       } catch { fail('STORAGE_ERROR', '消息暂未保存，请稍后重试'); }
     });

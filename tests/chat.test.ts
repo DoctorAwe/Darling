@@ -104,6 +104,29 @@ test('authenticated attachment upload broadcasts, persists and downloads exact b
   }
 });
 
+test('AI group text chat is durable, deduplicated and isolated from direct messages', async () => {
+  const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' } });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const url = `ws://127.0.0.1:${(app.server.address() as { port: number }).port}/ws`;
+  try {
+    const dva = await client(url); const mercy = await client(url);
+    await dva.login('dva'); await mercy.login('mercy');
+    const clientId = randomUUID();
+    const sent = await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId, text: '群聊第一条' }));
+    const delivered = await mercy.wait('group.message.stored');
+    assert.equal(sent.payload.sender, 'dva'); assert.equal(delivered.payload.id, sent.payload.id);
+    const duplicate = await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId, text: '不得覆盖' }));
+    assert.equal(duplicate.payload.id, sent.payload.id); assert.equal(duplicate.payload.text, '群聊第一条');
+    const groupPage = await mercy.wait('group.message.page', mercy.send('group.sync', { groupId: 'dva-mercy-echo', after: 0 }));
+    assert.equal(groupPage.payload.messages.length, 1); assert.equal(groupPage.payload.groupId, 'dva-mercy-echo');
+    const directPage = await mercy.wait('message.page', mercy.send('message.sync', { after: 0 }));
+    assert.equal(directPage.payload.messages.length, 0);
+    await mercy.wait('message.stored', mercy.send('message.send', { clientId: randomUUID(), text: '私聊仍独立' }));
+    const unchanged = await dva.wait('group.message.page', dva.send('group.sync', { groupId: 'dva-mercy-echo', after: 0 }));
+    assert.equal(unchanged.payload.messages.length, 1);
+  } finally { await app.close(); }
+});
+
 test('real WebSocket call signaling: auth, crossed invite, accept, replacement and stale call', async () => {
   const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' } });
   await app.listen({ host: '127.0.0.1', port: 0 });

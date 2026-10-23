@@ -10,6 +10,10 @@ export const IceConfig = z.object({
 export type IceConfig = z.infer<typeof IceConfig>;
 export const otherUser = (user: User): User => user === 'dva' ? 'mercy' : 'dva';
 export const Text = z.string().trim().min(1).max(8000);
+export const AiGroupId = z.literal('dva-mercy-echo');
+export type AiGroupId = z.infer<typeof AiGroupId>;
+export const GroupActor = z.enum(['dva', 'mercy', 'echo']);
+export type GroupActor = z.infer<typeof GroupActor>;
 const base = { version: z.literal(1), requestId: z.string().uuid() };
 export const CallState = z.object({
   callId: z.string().uuid(), caller: User, callee: User,
@@ -63,12 +67,16 @@ export const ClientPacket = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('auth.login'), payload: z.object({ username: User, password: z.string().min(1).max(512) }) }),
   z.object({ ...base, type: z.literal('message.send'), payload: z.object({ clientId: z.string().uuid(), text: Text }) }),
   z.object({ ...base, type: z.literal('message.sync'), payload: z.object({ after: z.number().int().min(0) }) }),
+  z.object({ ...base, type: z.literal('group.message.send'), payload: z.object({ groupId: AiGroupId, clientId: z.string().uuid(), text: Text }) }),
+  z.object({ ...base, type: z.literal('group.sync'), payload: z.object({ groupId: AiGroupId, after: z.number().int().min(0) }) }),
 ]);
 export type ClientPacket = z.infer<typeof ClientPacket>;
 export const Attachment = z.object({ id: z.string().uuid(), name: z.string().min(1).max(255), mime: z.string().min(1).max(128), size: z.number().int().nonnegative().max(128 * 1024 * 1024) }).strict();
 export type Attachment = z.infer<typeof Attachment>;
 export const Message = z.object({ id: z.string(), clientId: z.string(), sender: User, text: z.string(), attachment: Attachment.optional(), seq: z.number().int(), createdAt: z.string() });
 export type Message = z.infer<typeof Message>;
+export const GroupMessage = z.object({ id: z.string().uuid(), groupId: AiGroupId, clientId: z.string().uuid(), sender: GroupActor, messageType: z.enum(['text', 'attachment', 'assistant']), text: z.string(), seq: z.number().int().positive(), createdAt: z.string() }).strict();
+export type GroupMessage = z.infer<typeof GroupMessage>;
 export const ServerPacket = z.discriminatedUnion('type', [
   z.object({ version: z.literal(1), type: z.literal('rtc.config'), requestId: z.string(), payload: IceConfig }),
   z.object({ version: z.literal(1), type: z.literal('rtc.signal'), payload: z.object({ sender: User, signal: RtcSignal }) }),
@@ -82,6 +90,8 @@ export const ServerPacket = z.discriminatedUnion('type', [
   z.object({ version: z.literal(1), type: z.literal('session.replaced'), payload: z.object({}) }),
   z.object({ version: z.literal(1), type: z.literal('message.stored'), requestId: z.string().optional(), payload: Message }),
   z.object({ version: z.literal(1), type: z.literal('message.page'), requestId: z.string(), payload: z.object({ messages: z.array(Message), hasMore: z.boolean(), next: z.number().int() }) }),
+  z.object({ version: z.literal(1), type: z.literal('group.message.stored'), requestId: z.string().optional(), payload: GroupMessage }),
+  z.object({ version: z.literal(1), type: z.literal('group.message.page'), requestId: z.string(), payload: z.object({ groupId: AiGroupId, messages: z.array(GroupMessage), hasMore: z.boolean(), next: z.number().int() }) }),
   z.object({ version: z.literal(1), type: z.literal('error'), requestId: z.string().optional(), payload: z.object({ code: z.string(), message: z.string() }) }),
 ]);
 export type ServerPacket = z.infer<typeof ServerPacket>;
@@ -95,7 +105,7 @@ export type ClientConfig = z.infer<typeof ClientConfig>;
 export type PendingMessage = { clientId: string; sender: User; text: string; createdAt: string };
 export type Snapshot = {
   status: 'connecting' | 'online' | 'offline' | 'error' | 'replaced';
-  user?: User; online: User[]; messages: Message[]; pending: PendingMessage[];
+  user?: User; online: User[]; messages: Message[]; pending: PendingMessage[]; groupMessages?: GroupMessage[];
   detail: string; configPath: string; mediaAvailable: boolean;
   voiceBeta?: boolean; voiceConfigured?: boolean; voiceDetail?: string;
   remoteAudio?: { level: number | null; sampledAt: number };
@@ -118,6 +128,7 @@ export interface DesktopApi {
   snapshot(): Promise<Snapshot>;
   subscribe(listener: (snapshot: Snapshot) => void): () => void;
   send(text: string): Promise<{ ok: boolean; error?: string }>;
+  groupSend(text: string): Promise<{ ok: boolean; error?: string }>;
   attachmentPick(): Promise<Array<{ token: string; name: string; mime: string; size: number; image: boolean }>>;
   attachmentScreenshot(): Promise<{ token: string; name: string; mime: string; size: number; image: boolean } | null>;
   subscribeScreenshot(listener: (jpeg: Uint8Array) => void): () => void;
