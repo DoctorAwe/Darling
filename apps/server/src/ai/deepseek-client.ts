@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { readFileSync } from 'node:fs';
 
 export const AiConfig = z.object({
   enabled: z.boolean().default(true),
@@ -11,12 +12,23 @@ export const AiConfig = z.object({
 }).strict();
 export type AiConfig = z.infer<typeof AiConfig>;
 
-export type AiInputMessage = { role: 'system' | 'user' | 'assistant'; content: string; name?: 'dva' | 'mercy' };
-export interface AiClient { readonly model: string; stream(messages: AiInputMessage[], signal: AbortSignal): AsyncIterable<string>; }
+export type AiContent = string | Array<{ type: 'text'; text: string } | { type: 'file'; file_id: string }>;
+export type AiInputMessage = { role: 'system' | 'user' | 'assistant'; content: AiContent; name?: 'dva' | 'mercy' };
+export type AiImageFile = { name: string; mime: string; size: number; path: string };
+export interface AiClient { readonly model: string; stream(messages: AiInputMessage[], signal: AbortSignal): AsyncIterable<string>; uploadImage?(file: AiImageFile, signal: AbortSignal): Promise<{ fileId: string; expiresAt: string | null }>; }
 
 export class DeepSeekClient implements AiClient {
   readonly model: string;
   constructor(private config: AiConfig) { this.model = config.model; }
+  async uploadImage(file: AiImageFile, signal: AbortSignal) {
+    const form = new FormData(); form.append('purpose', 'user_data'); form.append('expires_after[anchor]', 'created_at'); form.append('expires_after[seconds]', '604800');
+    form.append('file', new Blob([readFileSync(file.path)], { type: file.mime }), file.name);
+    const response = await fetch(`${this.config.baseUrl.replace(/\/$/, '')}/files`, { method: 'POST', signal, headers: { authorization: `Bearer ${this.config.apiKey}` }, body: form });
+    if (!response.ok) throw new Error(`DeepSeek file upload failed (${response.status})`);
+    const parsed = z.object({ id: z.string().min(1), expires_at: z.number().int().optional() }).safeParse(await response.json());
+    if (!parsed.success) throw new Error('DeepSeek returned invalid file metadata');
+    return { fileId: parsed.data.id, expiresAt: parsed.data.expires_at ? new Date(parsed.data.expires_at * 1000).toISOString() : null };
+  }
   async *stream(messages: AiInputMessage[], signal: AbortSignal): AsyncIterable<string> {
     const response = await fetch(`${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST', signal,

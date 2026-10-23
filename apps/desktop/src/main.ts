@@ -207,15 +207,33 @@ void app.whenReady().then(() => {
       if (!response.ok) throw new Error(`服务器拒绝附件 (${response.status})`); pendingAttachments.delete(token); return { ok: true };
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : '附件发送失败' }; }
   });
+  ipcMain.handle('group:attachment-send', async (_event, token: unknown) => {
+    if (typeof token !== 'string') return { ok: false, error: '附件无效' }; const item = pendingAttachments.get(token); if (!item) return { ok: false, error: '附件已失效，请重新选择' };
+    try {
+      const connection = session.attachmentConnection(); const data = item.data ?? readFileSync(item.path!);
+      const response = await fetch(`${connection.baseUrl}/groups/dva-mercy-echo/attachments`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'x-darling-user': connection.user, 'x-darling-password': connection.password, 'x-client-id': item.clientId, 'x-file-name': encodeURIComponent(item.name), 'x-mime-type': item.mime }, body: Uint8Array.from(data) });
+      if (!response.ok) throw new Error(`服务器拒绝群聊附件 (${response.status})`); pendingAttachments.delete(token); return { ok: true };
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : '群聊附件发送失败' }; }
+  });
   const readAttachment = async (id: string) => {
     const connection = session.attachmentConnection(); const response = await fetch(`${connection.baseUrl}/attachments/${encodeURIComponent(id)}`, { headers: { 'x-darling-user': connection.user, 'x-darling-password': connection.password } });
     if (!response.ok) throw new Error(`无法读取附件 (${response.status})`); return { data: await response.arrayBuffer(), mime: response.headers.get('content-type') ?? 'application/octet-stream' };
   };
   ipcMain.handle('attachment:read', (_event, id: unknown) => typeof id === 'string' ? readAttachment(id) : Promise.reject(new Error('附件无效')));
+  const readGroupAttachment = async (id: string) => {
+    const connection = session.attachmentConnection(); const response = await fetch(`${connection.baseUrl}/groups/dva-mercy-echo/attachments/${encodeURIComponent(id)}`, { headers: { 'x-darling-user': connection.user, 'x-darling-password': connection.password } });
+    if (!response.ok) throw new Error(`无法读取群聊附件 (${response.status})`); return { data: await response.arrayBuffer(), mime: response.headers.get('content-type') ?? 'application/octet-stream' };
+  };
+  ipcMain.handle('group:attachment-read', (_event, id: unknown) => typeof id === 'string' ? readGroupAttachment(id) : Promise.reject(new Error('附件无效')));
   ipcMain.handle('attachment:save', async (_event, id: unknown, suggestedName: unknown) => {
     if (typeof id !== 'string' || typeof suggestedName !== 'string') return { ok: false, error: '附件无效' };
     const result = await dialog.showSaveDialog(window, { defaultPath: basename(suggestedName), title: '保存附件' }); if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
     try { const attachment = await readAttachment(id); writeFileSync(result.filePath, Buffer.from(attachment.data)); return { ok: true }; } catch (error) { return { ok: false, error: error instanceof Error ? error.message : '保存失败' }; }
+  });
+  ipcMain.handle('group:attachment-save', async (_event, id: unknown, suggestedName: unknown) => {
+    if (typeof id !== 'string' || typeof suggestedName !== 'string') return { ok: false, error: '附件无效' };
+    const result = await dialog.showSaveDialog(window, { defaultPath: basename(suggestedName), title: '保存群聊附件' }); if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+    try { const attachment = await readGroupAttachment(id); writeFileSync(result.filePath, Buffer.from(attachment.data)); return { ok: true }; } catch (error) { return { ok: false, error: error instanceof Error ? error.message : '保存失败' }; }
   });
   ipcMain.handle('session:reload', () => session.start());
   ipcMain.handle('voice:configure', (_event, value: unknown) => {

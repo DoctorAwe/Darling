@@ -174,6 +174,31 @@ test('stopping Echo aborts generation and never persists a partial answer', asyn
   } finally { await app.close(); }
 });
 
+test('group images upload independently and are reused as DeepSeek file context', async () => {
+  const attachmentsDir = mkdtempSync(join(tmpdir(), 'darling-group-files-')); let uploads = 0; const calls: AiInputMessage[][] = [];
+  const fake: AiClient = {
+    model: 'test-vision',
+    async uploadImage(file) { uploads++; assert.equal(file.name, '群聊图片.png'); assert.equal(file.mime, 'image/png'); return { fileId: 'file-api-test-image', expiresAt: new Date(Date.now() + 3600000).toISOString() }; },
+    async *stream(messages) { calls.push(messages); yield '看到了图片'; },
+  };
+  const app = await createServer({ database: ':memory:', attachmentsDir, users: { dva: 'dva-pass', mercy: 'mercy-pass' }, aiClient: fake });
+  await app.listen({ host: '127.0.0.1', port: 0 }); const port = (app.server.address() as { port: number }).port; const url = `ws://127.0.0.1:${port}/ws`;
+  try {
+    const dva = await client(url); const mercy = await client(url); await dva.login('dva'); await mercy.login('mercy');
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const response = await fetch(`http://127.0.0.1:${port}/groups/dva-mercy-echo/attachments`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'x-darling-user': 'dva', 'x-darling-password': 'dva-pass', 'x-client-id': randomUUID(), 'x-file-name': encodeURIComponent('群聊图片.png'), 'x-mime-type': 'image/png' }, body: bytes });
+    assert.equal(response.status, 201); const attachmentMessage = await dva.wait('group.message.stored'); assert.equal(attachmentMessage.payload.attachment.name, '群聊图片.png');
+    const download = await fetch(`http://127.0.0.1:${port}/groups/dva-mercy-echo/attachments/${attachmentMessage.payload.attachment.id}`, { headers: { 'x-darling-user': 'mercy', 'x-darling-password': 'mercy-pass' } });
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
+    await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: '@Echo 图片里有什么？' })); await dva.wait('group.ai.completed');
+    await dva.wait('group.message.stored', dva.send('group.message.send', { groupId: 'dva-mercy-echo', clientId: randomUUID(), text: '@Echo 再看一次图片' })); await dva.wait('group.ai.completed');
+    assert.equal(uploads, 1); assert.equal(calls.length, 2);
+    const imageMessage = calls[0].find(message => Array.isArray(message.content));
+    assert.deepEqual(imageMessage?.content, [{ type: 'text', text: '[图片：群聊图片.png]' }, { type: 'file', file_id: 'file-api-test-image' }]);
+    const privatePage = await mercy.wait('message.page', mercy.send('message.sync', { after: 0 })); assert.equal(privatePage.payload.messages.length, 0);
+  } finally { await app.close(); rmSync(attachmentsDir, { recursive: true, force: true }); }
+});
+
 test('real WebSocket call signaling: auth, crossed invite, accept, replacement and stale call', async () => {
   const app = await createServer({ database: ':memory:', users: { dva: 'dva-pass', mercy: 'mercy-pass' } });
   await app.listen({ host: '127.0.0.1', port: 0 });

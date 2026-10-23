@@ -26,18 +26,32 @@ export class AiOrchestrator {
     if (!this.active || this.active.requestId !== requestId) return false;
     this.active.cancelled = true; this.active.controller.abort(); return true;
   }
-  private context(groupId: AiGroupId, throughSeq: number): AiInputMessage[] {
+  private async context(groupId: AiGroupId, throughSeq: number, signal: AbortSignal): Promise<AiInputMessage[]> {
     const history = this.store.groupRecent(groupId, throughSeq, 60);
-    return [{ role: 'system', content: persona }, ...history.map(message => message.sender === 'echo'
-      ? { role: 'assistant' as const, content: message.text }
-      : { role: 'user' as const, name: message.sender, content: message.text })];
+    const eligible = history.filter(message => message.attachment && message.attachment.size <= 64 * 1024 * 1024 && ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(message.attachment.mime)).slice(-4);
+    const files = new Map<string, string>();
+    if (this.client?.uploadImage) for (const message of eligible) {
+      const attachment = this.store.groupAttachment(message.attachment!.id); if (!attachment) continue;
+      const cached = this.store.aiFileBinding(attachment.id);
+      if (cached && (!cached.expiresAt || Date.parse(cached.expiresAt) > Date.now() + 60000)) files.set(attachment.id, cached.providerFileId);
+      else {
+        const uploaded = await this.client.uploadImage(attachment, signal); this.store.saveAiFileBinding(attachment.id, uploaded.fileId, uploaded.expiresAt); files.set(attachment.id, uploaded.fileId);
+      }
+    }
+    return [{ role: 'system', content: persona }, ...history.map(message => {
+      if (message.sender === 'echo') return { role: 'assistant' as const, content: message.text };
+      const fileId = message.attachment && files.get(message.attachment.id);
+      const label = message.attachment ? `[${fileId ? '图片' : '附件'}：${message.attachment.name}]` : message.text;
+      return { role: 'user' as const, name: message.sender, content: fileId ? [{ type: 'text' as const, text: label }, { type: 'file' as const, file_id: fileId }] : label };
+    })];
   }
   private async run(trigger: GroupMessage, requestId: string) {
     const client = this.client!; const controller = new AbortController(); const active = this.active = { requestId, controller, cancelled: false }; const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     this.publish({ type: 'started', groupId: trigger.groupId, requestId, triggerMessageId: trigger.id });
     try {
       let answer = '';
-      for await (const delta of client.stream(this.context(trigger.groupId, trigger.seq), controller.signal)) {
+      const context = await this.context(trigger.groupId, trigger.seq, controller.signal);
+      for await (const delta of client.stream(context, controller.signal)) {
         answer += delta;
         if (answer.length > 64000) throw new Error('Echo 回答过长');
         this.publish({ type: 'delta', groupId: trigger.groupId, requestId, delta });

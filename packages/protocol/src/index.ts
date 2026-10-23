@@ -76,7 +76,7 @@ export const Attachment = z.object({ id: z.string().uuid(), name: z.string().min
 export type Attachment = z.infer<typeof Attachment>;
 export const Message = z.object({ id: z.string(), clientId: z.string(), sender: User, text: z.string(), attachment: Attachment.optional(), seq: z.number().int(), createdAt: z.string() });
 export type Message = z.infer<typeof Message>;
-export const GroupMessage = z.object({ id: z.string().uuid(), groupId: AiGroupId, clientId: z.string().uuid(), sender: GroupActor, messageType: z.enum(['text', 'attachment', 'assistant']), text: z.string(), seq: z.number().int().positive(), createdAt: z.string() }).strict();
+export const GroupMessage = z.object({ id: z.string().uuid(), groupId: AiGroupId, clientId: z.string().uuid(), sender: GroupActor, messageType: z.enum(['text', 'attachment', 'assistant']), text: z.string(), attachment: Attachment.optional(), seq: z.number().int().positive(), createdAt: z.string() }).strict();
 export type GroupMessage = z.infer<typeof GroupMessage>;
 export const ServerPacket = z.discriminatedUnion('type', [
   z.object({ version: z.literal(1), type: z.literal('rtc.config'), requestId: z.string(), payload: IceConfig }),
@@ -137,6 +137,9 @@ export interface DesktopApi {
   send(text: string): Promise<{ ok: boolean; error?: string }>;
   groupSend(text: string): Promise<{ ok: boolean; error?: string }>;
   groupAiCancel(requestId: string): Promise<{ ok: boolean; error?: string }>;
+  groupAttachmentSend(token: string): Promise<{ ok: boolean; error?: string }>;
+  groupAttachmentRead(id: string): Promise<{ data: ArrayBuffer; mime: string }>;
+  groupAttachmentSave(id: string, suggestedName: string): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>;
   attachmentPick(): Promise<Array<{ token: string; name: string; mime: string; size: number; image: boolean }>>;
   attachmentScreenshot(): Promise<{ token: string; name: string; mime: string; size: number; image: boolean } | null>;
   subscribeScreenshot(listener: (jpeg: Uint8Array) => void): () => void;

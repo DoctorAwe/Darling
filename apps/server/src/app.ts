@@ -75,6 +75,27 @@ export async function createServer(options: { database: string; users: Record<Us
     if (!attachment) return reply.code(404).send({ error: 'NOT_FOUND' });
     return reply.type(attachment.mime).header('content-length', attachment.size).header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(attachment.name)}`).send(readFileSync(attachment.path));
   });
+  app.post('/groups/:groupId/attachments', { bodyLimit: 128 * 1024 * 1024 }, async (request, reply) => {
+    const user = httpUser(request.headers); if (!user) return reply.code(401).send({ error: 'AUTH_REQUIRED' });
+    const groupId = (request.params as { groupId?: string }).groupId;
+    const clientId = request.headers['x-client-id']; const encodedName = request.headers['x-file-name']; const mime = request.headers['x-mime-type']; const body = request.body;
+    if (groupId !== 'dva-mercy-echo' || typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId) || typeof encodedName !== 'string' || typeof mime !== 'string' || !Buffer.isBuffer(body)) return reply.code(400).send({ error: 'INVALID_GROUP_ATTACHMENT' });
+    let name = ''; try { name = decodeURIComponent(encodedName).replace(/[\\/\0-\x1f]/g, '_').trim(); } catch { return reply.code(400).send({ error: 'INVALID_NAME' }); }
+    const attachment = Attachment.safeParse({ id: randomUUID(), name, mime, size: body.length }); if (!attachment.success) return reply.code(400).send({ error: 'INVALID_GROUP_ATTACHMENT' });
+    const path = join(attachmentsDir, `${attachment.data.id}.group.bin`); writeFileSync(path, body, { flag: 'wx' });
+    try {
+      const result = store.saveGroupAttachment(groupId, user, clientId, attachment.data, path);
+      if (!result.inserted) rmSync(path, { force: true });
+      if (result.inserted) { const packet: ServerPacket = { version: 1, type: 'group.message.stored', payload: result.message }; for (const target of sessions.values()) send(target, packet); }
+      return reply.code(result.inserted ? 201 : 200).send({ message: result.message });
+    } catch (error) { rmSync(path, { force: true }); throw error; }
+  });
+  app.get('/groups/:groupId/attachments/:id', async (request, reply) => {
+    const user = httpUser(request.headers); if (!user) return reply.code(401).send({ error: 'AUTH_REQUIRED' });
+    const params = request.params as { groupId?: string; id?: string }; const attachment = params.groupId === 'dva-mercy-echo' && typeof params.id === 'string' ? store.groupAttachment(params.id) : undefined;
+    if (!attachment || attachment.groupId !== params.groupId) return reply.code(404).send({ error: 'NOT_FOUND' });
+    return reply.type(attachment.mime).header('content-length', attachment.size).header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(attachment.name)}`).send(readFileSync(attachment.path));
+  });
   app.get('/ws', { websocket: true }, socket => {
     sockets.add(socket);
     let user: User | undefined;
