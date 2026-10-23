@@ -21,7 +21,7 @@ const Packet = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('rtc.ok'), payload: Scope }),
   z.object({ ...base, type: z.literal('rtc.stats'), payload: Scope.extend({ stats: z.array(z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))).max(32) }) }),
   z.object({ ...base, type: z.literal('rtc.description'), payload: RtcSignal }),
-  z.object({ ...base, type: z.literal('rtc.events'), payload: Scope.extend({ candidates: z.array(Ice).max(16), connectionState: z.enum(['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']), iceState: z.string().optional(), dataState: z.enum(['unavailable', 'connecting', 'open', 'closing', 'closed']).default('unavailable'), messages: z.array(z.string().min(1).max(4096)).max(16).default([]) }) }),
+  z.object({ ...base, type: z.literal('rtc.events'), payload: Scope.extend({ candidates: z.array(Ice).max(16), connectionState: z.enum(['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']), iceState: z.string().optional(), dataState: z.enum(['unavailable', 'connecting', 'open', 'closing', 'closed']).default('unavailable'), messages: z.array(z.string().min(1).max(4096)).max(16).default([]), videoFrames: z.number().int().nonnegative().default(0), videoAttached: z.boolean().default(false) }) }),
 ]);
 type Packet = z.infer<typeof Packet>;
 
@@ -155,6 +155,7 @@ export class RtcProcessHost extends EventEmitter {
       this.emit('ice-state', packet.payload.iceState);
       this.emit('data-state', packet.payload.dataState);
       for (const message of packet.payload.messages) this.emit('data', message);
+      this.emit('video-stats', { frames: packet.payload.videoFrames, attached: packet.payload.videoAttached });
       if (packet.payload.connectionState === 'failed') this.fail('ICE/DTLS connection failed');
     }).catch(() => this.fail('RTC event polling failed')).finally(() => {
       this.polling = false;
@@ -175,6 +176,18 @@ export class RtcProcessHost extends EventEmitter {
     if (typeof message !== 'string' || message.length === 0 || Buffer.byteLength(message) > 4096) throw new Error('Invalid data message');
     const packet = await this.request('rtc.data.send', { ...this.scope, message });
     if (packet.type !== 'rtc.ok') throw new Error('Data channel send failed');
+  }
+  async attachVideo(parentWindow: bigint, bounds: { x: number; y: number; width: number; height: number }) {
+    await this.videoWindow('rtc.video.attach', parentWindow, bounds);
+  }
+  async resizeVideo(parentWindow: bigint, bounds: { x: number; y: number; width: number; height: number }) {
+    await this.videoWindow('rtc.video.resize', parentWindow, bounds);
+  }
+  private async videoWindow(type: 'rtc.video.attach' | 'rtc.video.resize', parentWindow: bigint, bounds: { x: number; y: number; width: number; height: number }) {
+    if (parentWindow <= 0n || !Number.isInteger(bounds.x) || !Number.isInteger(bounds.y) || !Number.isInteger(bounds.width) || !Number.isInteger(bounds.height) || bounds.x < -32768 || bounds.x > 32767 || bounds.y < -32768 || bounds.y > 32767 || bounds.width < 1 || bounds.width > 16384 || bounds.height < 1 || bounds.height > 16384)
+      throw new Error('Invalid video window');
+    const packet = await this.request(type, { ...this.scope, parentWindow: parentWindow.toString(), ...bounds });
+    if (packet.type !== 'rtc.ok') throw new Error('Video window operation failed');
   }
   private request(type: string, payload: object = {}): Promise<Packet> {
     if (this.closed || !this.child || this.child.stdin.destroyed) return Promise.reject(new Error('RTC host closed'));

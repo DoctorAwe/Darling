@@ -3,6 +3,7 @@
 #include <deque>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <nlohmann/json.hpp>
@@ -32,6 +33,7 @@
 #include "modules/audio_device/include/audio_device_factory.h"
 #include "rtc_base/win/scoped_com_initializer.h"
 #include "desktop_track_source.h"
+#include "desktop_video_renderer.h"
 
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
@@ -45,6 +47,7 @@ class Observer : public webrtc::PeerConnectionObserver,
   webrtc::scoped_refptr<webrtc::DataChannelInterface> control;
   std::deque<std::string> control_messages;
   bool control_overflow = false;
+  std::unique_ptr<darling::DesktopVideoRenderer> video_renderer;
   void AttachControl(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
     if (!channel || channel->label() != "control" || control) return;
     control = std::move(channel);
@@ -67,6 +70,14 @@ class Observer : public webrtc::PeerConnectionObserver,
   void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) override {
     AttachControl(std::move(channel));
   }
+  void OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver) override {
+    auto track = transceiver->receiver()->track();
+    if (!track || track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind || video_renderer) return;
+    video_renderer = std::make_unique<darling::DesktopVideoRenderer>(
+        webrtc::scoped_refptr<webrtc::VideoTrackInterface>(
+            static_cast<webrtc::VideoTrackInterface*>(track.get())));
+  }
+  void ResetVideo() { video_renderer.reset(); }
   void OnStateChange() override {}
   void OnMessage(const webrtc::DataBuffer& buffer) override {
     if (buffer.binary || buffer.size() == 0 || buffer.size() > 4096) {
@@ -161,7 +172,7 @@ class Engine {
   std::shared_ptr<darling::AecMetrics> aec_metrics;
   bool Start() { return network->Start() && worker->Start() && signaling->Start(); }
   void Close() {
-    signaling->BlockingCall([&] { peer_observer.ResetControl(); if (pc) pc->Close(); pc = nullptr; local_audio = nullptr; local_video = nullptr; desktop_source = nullptr; factory = nullptr;
+    signaling->BlockingCall([&] { peer_observer.ResetControl(); peer_observer.ResetVideo(); if (pc) pc->Close(); pc = nullptr; local_audio = nullptr; local_video = nullptr; desktop_source = nullptr; factory = nullptr;
       peer_observer.candidates = Json::array(); peer_observer.candidate_count = 0; peer_observer.overflow = false; });
     if (synthetic) synthetic->Terminate();
     synthetic = nullptr;
@@ -280,6 +291,13 @@ class Engine {
       if (!result.ok()) return;
       pc = result.MoveValue(); pc->SetAudioRecording(synthetic_enabled || wasapi_enabled); pc->SetAudioPlayout(synthetic_enabled || wasapi_enabled);
       if (control_enabled && requested_role == "caller") {
+        webrtc::RtpTransceiverInit video_receiver;
+        video_receiver.direction = webrtc::RtpTransceiverDirection::kRecvOnly;
+        if (!pc->AddTransceiver(webrtc::MediaType::VIDEO, video_receiver).ok()) {
+          pc->Close(); pc = nullptr; return;
+        }
+      }
+      if (control_enabled && requested_role == "caller") {
         webrtc::DataChannelInit init;
         init.ordered = true;
         auto channel = pc->CreateDataChannelOrError("control", &init);
@@ -362,6 +380,19 @@ bool Uuid(const std::string& value) {
     if (i == 8 || i == 13 || i == 18 || i == 23) { if (value[i] != '-') return false; }
     else if (!((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f') || (value[i] >= 'A' && value[i] <= 'F'))) return false;
   }
+  return true;
+}
+bool Uintptr(const std::string& value, uintptr_t* result) {
+  if (value.empty()) return false;
+  uintptr_t parsed = 0;
+  for (const char c : value) {
+    if (c < '0' || c > '9') return false;
+    const auto digit = static_cast<uintptr_t>(c - '0');
+    if (parsed > (std::numeric_limits<uintptr_t>::max() - digit) / 10) return false;
+    parsed = parsed * 10 + digit;
+  }
+  if (!parsed) return false;
+  *result = parsed;
   return true;
 }
 bool ServersValid(const Json& servers) {
@@ -472,6 +503,32 @@ int main(int argc, char** argv) {
             if (!engine.peer_observer.SendControl(payload["message"])) error = "DATA_CHANNEL_NOT_OPEN";
           });
         }
+        else if (type == "rtc.video.attach" || type == "rtc.video.resize") {
+          if (!engine.control_enabled || engine.role != "caller" ||
+              !String(payload, "parentWindow", 32) ||
+              !payload.contains("x") || !payload["x"].is_number_integer() ||
+              !payload.contains("y") || !payload["y"].is_number_integer() ||
+              !payload.contains("width") || !payload["width"].is_number_integer() ||
+              !payload.contains("height") || !payload["height"].is_number_integer() ||
+              payload["x"] < -32768 || payload["x"] > 32767 ||
+              payload["y"] < -32768 || payload["y"] > 32767 ||
+              payload["width"] < 1 || payload["width"] > 16384 ||
+              payload["height"] < 1 || payload["height"] > 16384) error = "INVALID_VIDEO_WINDOW";
+          else {
+            uintptr_t parent = 0;
+            if (!Uintptr(payload["parentWindow"], &parent)) error = "INVALID_VIDEO_WINDOW";
+            if (error.empty()) engine.signaling->BlockingCall([&] {
+              auto* renderer = engine.peer_observer.video_renderer.get();
+              if (!renderer) { error = "VIDEO_TRACK_UNAVAILABLE"; return; }
+              const int x = payload["x"], y = payload["y"], width = payload["width"], height = payload["height"];
+              if (type == "rtc.video.attach") {
+                if (!renderer->Attach(parent, x, y, width, height)) error = "VIDEO_WINDOW_ATTACH_FAILED";
+              } else {
+                renderer->Resize(x, y, width, height);
+              }
+            });
+          }
+        }
         else if (type == "rtc.stats") {
           auto callback = webrtc::make_ref_counted<Stats>(); auto future = callback->result.get_future();
           engine.signaling->BlockingCall([&] { engine.pc->GetStats(callback.get()); });
@@ -529,6 +586,8 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < count; ++i) response["candidates"].push_back(queue[i]);
             queue.erase(queue.begin(), queue.begin() + count);
             response["dataState"] = engine.peer_observer.ControlState();
+            response["videoFrames"] = engine.peer_observer.video_renderer ? engine.peer_observer.video_renderer->frames() : 0;
+            response["videoAttached"] = engine.peer_observer.video_renderer && engine.peer_observer.video_renderer->attached();
             response["messages"] = Json::array();
             auto& messages = engine.peer_observer.control_messages;
             const size_t message_count = messages.size() < 16 ? messages.size() : 16;

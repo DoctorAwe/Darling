@@ -16,7 +16,7 @@ index 5bbc5b7..231c5bc 100644
      ]
  
      sources = []
-@@ -592,6 +599,73 @@ if (!build_with_chromium) {
+@@ -592,6 +599,78 @@ if (!build_with_chromium) {
      }
    }
  
@@ -25,13 +25,18 @@ index 5bbc5b7..231c5bc 100644
 +    sources = [
 +      "../../../native/rtc-smoke/rtc_process.cc",
 +      "../../../native/rtc-smoke/desktop_track_source.cc",
++      "../../../native/rtc-smoke/desktop_video_renderer.cc",
 +      "../../../native/media-engine/src/aec/linear_aec.cpp",
 +      "../../../native/media-engine/src/aec/delay_estimator.cpp",
 +      "../../../native/media-engine/src/aec/residual_suppressor.cpp",
 +    ]
 +    include_dirs = [ "../../../native/media-engine/build/_deps/json-src/include" ]
 +    defines = [ "JSON_NOEXCEPTION", "DARLING_AEC_NO_EXCEPTIONS" ]
-+    libs = [ "../../rnnoise-build/Release/darling_rnnoise.lib" ]
++    libs = [
++      "../../rnnoise-build/Release/darling_rnnoise.lib",
++      "gdi32.lib",
++      "user32.lib",
++    ]
 +    deps = [
 +      ":webrtc",
 +      "//api/video_codecs:builtin_video_decoder_factory",

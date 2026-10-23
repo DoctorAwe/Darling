@@ -39,5 +39,6 @@
 - 已增加基于 WebRTC Windows Graphics Capture 的 `DesktopTrackSource`，明确设置 `prefer_cursor_embedded=false`，并关闭会退回旧采集器的路径；因此不再依赖 Chromium 对桌面媒体约束的处理。
 - 已将原生桌面源接入 `darling_rtc_process --desktop-video` 的发送视频轨，并保留 `contentHint=text`。本机 2560×1600 主显示器探针实测 `mayContainCursor=false`、`trackCursorEmbedded=false`。
 - 已加入 `--control-data` 原生有序控制 DataChannel：控制端在 offer 前创建，被控端按固定标签接收；单条消息、接收队列和发送缓冲均有硬上限。两个本机原生进程已经通过真实 ICE/DTLS 连接完成控制消息往返。
+- 控制端现在会在 offer 中声明只接收的视频收发器，收到桌面视频轨后接入原生 Windows 子窗口渲染器。渲染窗口支持等比缩放、黑边填充、动态尺寸更新与鼠标命中穿透；端到端测试已实际完成当前桌面的采集、编码、ICE/DTLS 传输和控制端解码，不再只验证 SDP。
 - 这一步只完成原生采集和发送轨，不代表正式客户端已经切换。下一阶段需要让原生 PeerConnection 同时承载桌面视频、语音与控制 DataChannel，并把接收画面交给控制窗口；完成前不得删除 Chromium 正式链路或宣称客户端已无光标。
 - 当前原生轨使用 WebRTC 内置视频编码器工厂，尚未接入 NVENC；硬件编码能力必须以实际编码器选择和运行时统计为准。
