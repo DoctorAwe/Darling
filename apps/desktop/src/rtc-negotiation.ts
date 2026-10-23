@@ -8,7 +8,7 @@ export class RtcNegotiation {
   private timer?: ReturnType<typeof setTimeout>;
   private attempted?: string;
   private levelTimer?: ReturnType<typeof setTimeout>;
-  constructor(private session: Session, private executable: string, private iceMode: 'disabled' | 'direct' | 'relay' = 'disabled', private devices?: () => DeviceAudio | undefined, private createHost = (...args: ConstructorParameters<typeof RtcProcessHost>) => new RtcProcessHost(...args), private aec3Experimental = false) {
+  constructor(private session: Session, private executable: string, private iceMode: 'disabled' | 'direct' | 'relay' = 'disabled', private devices?: () => DeviceAudio | undefined, private createHost = (...args: ConstructorParameters<typeof RtcProcessHost>) => new RtcProcessHost(...args), private aec3Experimental = false, private diagnostic?: (value: object) => void) {
     session.on('state', this.state);
     session.on('rtc.signal', this.signal);
     session.on('rtc.closed', this.closed);
@@ -28,6 +28,7 @@ export class RtcNegotiation {
     const host = this.host = this.createHost(this.executable, { callId: call.callId, generation: 1 }, state.user === call.caller ? 'caller' : 'callee', audio ? ['--wasapi-audio', ...(this.aec3Experimental ? ['--aec3-experimental'] : [])] : [], 15000, this.iceMode, this.iceMode === 'relay' ? this.session.getIceConfig() : undefined, audio, audio ? 0 : 60000);
     let outgoing = Promise.resolve();
     let readySent = false;
+    let samples = 0;
     const sample = async () => {
       if (this.host !== host) return;
       let level: number | null = null;
@@ -35,6 +36,11 @@ export class RtcNegotiation {
         const stats = await host.diagnosticStats();
         const inbound = stats.find(s => s.type === 'inbound-rtp' && s.codec === 'audio/opus');
         if (typeof inbound?.audioLevel === 'number' && Number.isFinite(inbound.audioLevel)) level = Math.max(0, Math.min(1, inbound.audioLevel));
+        if (++samples % 20 === 1) {
+          const outbound = stats.find(s => s.type === 'outbound-rtp' && s.codec === 'audio/opus');
+          const aec = stats.find(s => s.type === 'aec'); const noise = stats.find(s => s.type === 'noise-suppression');
+          this.diagnostic?.({ at: new Date().toISOString(), callId: call.callId, user: state.user, inboundPackets: inbound?.packetsReceived ?? null, inboundLevel: inbound?.audioLevel ?? null, outboundPackets: outbound?.packetsSent ?? null, aecFrames: aec?.postFrames ?? aec?.frames ?? null, noiseFrames: noise?.frames ?? null });
+        }
       } catch { /* Meter failure does not end a call. */ }
       if (this.host === host) { this.session.remoteLevel(level); this.levelTimer = setTimeout(() => void sample(), 250); }
     };
@@ -43,7 +49,11 @@ export class RtcNegotiation {
       if (connection === 'connected' && !readySent) {
         readySent = true;
         void sample();
-        void outgoing.then(() => { if (this.host === host) { this.session.mediaReady(call.callId); this.session.voiceStatus('TURN 中继音频已连接 · 测试版'); } }).catch(() => this.failed(host));
+        // Re-assert both track directions after SDP created the receiver. This
+        // also recovers Windows audio sessions released by a prior screen share.
+        void outgoing.then(() => host.setAudio(false, false)).then(() => {
+          if (this.host === host) { this.session.mediaReady(call.callId); this.session.voiceStatus('TURN 中继音频已连接 · 测试版'); }
+        }).catch(() => this.failed(host));
       }
       if (connection === 'failed' || connection === 'disconnected') this.failed(host);
     });

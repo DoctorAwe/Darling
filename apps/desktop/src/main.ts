@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { resolveAec3Enabled } from './aec-mode';
 import { RemoteSignal } from '../../../packages/protocol/src/index';
 import { RemoteInputGate, RemoteInputHost } from './remote-input';
+import { remoteWindowPolicy } from './remote-window-policy';
 
 if (process.platform === 'win32') {
   // Prefer the discrete adapter (typically NVIDIA on dual-GPU systems) and expose
@@ -58,7 +59,9 @@ void app.whenReady().then(() => {
   if (voiceBeta) {
     session.configureVoice(true, true);
     session.voiceStatus(voiceDescription);
-    rtcNegotiation = new RtcNegotiation(session, rtcExecutable, 'relay', () => voiceDevices, undefined, aec3Enabled);
+    rtcNegotiation = new RtcNegotiation(session, rtcExecutable, 'relay', () => voiceDevices, undefined, aec3Enabled, value => {
+      try { appendFileSync(join(app.getPath('userData'), 'voice-call.log'), `${JSON.stringify(value)}\n`, 'utf8'); } catch { /* Diagnostics must never interrupt audio. */ }
+    });
   }
   rtcDeviceTest = new RtcDeviceTest(voiceBeta ? rtcExecutable : undefined, undefined, aec3Enabled);
   const preferences=new AudioPreferences(join(app.getPath('userData'),'audio-preferences.json'));
@@ -76,7 +79,10 @@ void app.whenReady().then(() => {
     webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, autoplayPolicy: 'no-user-gesture-required' },
   });
   ipcMain.handle('session:snapshot', () => structuredClone(session.state));
-  ipcMain.handle('remote:action', (_event, action: unknown, sessionId: unknown, permissions: unknown) => session.remoteAction(action, sessionId, permissions));
+  ipcMain.handle('remote:action', (_event, action: unknown, sessionId: unknown, permissions: unknown) => {
+    if ((action === 'invite' || action === 'accept') && session.state.call && session.state.call.phase !== 'ended') return { ok: false, error: '请先结束语音通话，再开始远程桌面' };
+    return session.remoteAction(action, sessionId, permissions);
+  });
   ipcMain.handle('remote:permissions', (_event, sessionId: unknown, permissions: unknown) => session.remotePermissions(sessionId, permissions));
   ipcMain.handle('remote:ice', async () => { await session.refreshIce(); const ice = session.getIceConfig(); if (!ice) throw new Error('中继配置不可用'); return ice; });
   ipcMain.handle('remote:signal', (_event, value: unknown) => session.sendRemoteSignal(RemoteSignal.parse(value)));
@@ -188,10 +194,15 @@ void app.whenReady().then(() => {
     if (!voiceBeta) return { ok: false, error: '当前版本未启用语音' };
     if (action !== 'invite' && action !== 'accept') return { ok: false, error: '无效通话操作' };
     if (session.state.call && ['connecting', 'active'].includes(session.state.call.phase)) return { ok: false, error: '通话已在进行' };
+    if (session.state.remote && session.state.remote.phase !== 'ended') return { ok: false, error: '请先结束远程桌面，再开始语音通话' };
     if (rtcDeviceTest.active || mediaStarting || media.state.capture?.running || media.state.playback?.running) return { ok: false, error: '请先停止设备测试' };
     const preparation = ++callPreparation;
     mediaStarting = true;
     try {
+      const staleRemoteWindow = !!remoteControlWindow || !!remoteStatusWindow;
+      if (remoteControlWindow) { remoteControlWindow.destroy(); remoteControlWindow = undefined; }
+      if (remoteStatusWindow) { remoteStatusWindow.destroy(); remoteStatusWindow = undefined; }
+      if (staleRemoteWindow) { await remoteInput.stop(); await new Promise(resolve => setTimeout(resolve, 120)); }
       await media.inspect();
       voiceDevices = DeviceAudio.parse(defaultCallAudio(media.state.devices));
       session.voiceStatus(voiceDescription);
@@ -287,14 +298,12 @@ void app.whenReady().then(() => {
     callback({ video: primary, ...(request.audioRequested && remote.permissions.audio ? { audio: 'loopback' as const } : {}) });
   });
   const syncRemoteWindows = (state: typeof session.state) => {
-    const remote = state.remote; const live = remote && ['connecting', 'active'].includes(remote.phase);
-    const controller = !!remote && remote.controller === state.user && (live || remote.phase === 'ended');
-    const controlled = live && remote.controlled === state.user;
-    if (controller && !remoteControlWindow) remoteControlWindow = openRemoteSurface('remote-control');
-    if (controlled && !remoteStatusWindow) remoteStatusWindow = openRemoteSurface('remote-status');
-    if (!controller && remoteControlWindow) { remoteControlWindow.destroy(); remoteControlWindow = undefined; }
-    if (!controlled && remoteStatusWindow) { remoteStatusWindow.destroy(); remoteStatusWindow = undefined; }
-    if (!controlled || !remote?.permissions.control) void remoteInput.stop();
+    const remote = state.remote; const policy = remoteWindowPolicy(remote, state.user, !!remoteControlWindow);
+    if (policy.createController && !remoteControlWindow) remoteControlWindow = openRemoteSurface('remote-control');
+    if (policy.controlled && !remoteStatusWindow) remoteStatusWindow = openRemoteSurface('remote-status');
+    if (!policy.keepController && remoteControlWindow) { remoteControlWindow.destroy(); remoteControlWindow = undefined; }
+    if (!policy.controlled && remoteStatusWindow) { remoteStatusWindow.destroy(); remoteStatusWindow = undefined; }
+    if (!policy.controlled || !remote?.permissions.control) void remoteInput.stop();
   };
   session.on('state', state => {
     for (const target of [window, remoteControlWindow, remoteStatusWindow]) if (target && !target.isDestroyed()) target.webContents.send('session:state', state);
