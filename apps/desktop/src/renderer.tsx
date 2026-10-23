@@ -53,18 +53,36 @@ function App() {
     return off;
   }, []);
   useLayoutEffect(() => {
-    const element = messages.current; if (!element || (initialHistoryAnchored.current && !keepMessagesAtBottom.current)) return;
+    const element = messages.current; if (!element || !state.user || (initialHistoryAnchored.current && !keepMessagesAtBottom.current)) return;
     const scroll = () => { element.scrollTop = element.scrollHeight; };
-    let firstFrame = 0, secondFrame = 0, settleTimer: ReturnType<typeof setTimeout> | undefined;
-    const timer = setTimeout(() => {
-      ignoreMessageScrollUntil.current = Number.POSITIVE_INFINITY;
-      firstFrame = requestAnimationFrame(() => { secondFrame = requestAnimationFrame(() => {
-        scroll(); ignoreMessageScrollUntil.current = Date.now() + 160;
-        settleTimer = setTimeout(() => { initialHistoryAnchored.current = true; }, 160);
-      }); });
-    }, initialHistoryAnchored.current ? 0 : 300);
-    return () => { clearTimeout(timer); clearTimeout(settleTimer); cancelAnimationFrame(firstFrame); cancelAnimationFrame(secondFrame); };
-  }, [state.messages.length, state.pending.length]);
+    if (initialHistoryAnchored.current) {
+      const frame = requestAnimationFrame(scroll);
+      return () => cancelAnimationFrame(frame);
+    }
+    ignoreMessageScrollUntil.current = Number.POSITIVE_INFINITY;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      scroll();
+      if (element.querySelector('[data-preview-state="loading"]')) return;
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        scroll();
+        ignoreMessageScrollUntil.current = Date.now() + 160;
+        initialHistoryAnchored.current = true;
+      }, 240);
+    };
+    const resizeObserver = new ResizeObserver(finish);
+    const mutationObserver = new MutationObserver(() => {
+      for (const child of Array.from(element.children)) resizeObserver.observe(child);
+      finish();
+    });
+    resizeObserver.observe(element);
+    for (const child of Array.from(element.children)) resizeObserver.observe(child);
+    mutationObserver.observe(element, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-preview-state', 'src'] });
+    const frame = requestAnimationFrame(finish);
+    const fallback = setTimeout(() => { clearTimeout(settleTimer); scroll(); ignoreMessageScrollUntil.current = Date.now() + 160; initialHistoryAnchored.current = true; }, 10000);
+    return () => { clearTimeout(settleTimer); clearTimeout(fallback); cancelAnimationFrame(frame); resizeObserver.disconnect(); mutationObserver.disconnect(); };
+  }, [state.user, state.messages.length, state.pending.length]);
   useEffect(() => {
     const element = messages.current; if (!element) return;
     const observer = new ResizeObserver(() => { if (initialHistoryAnchored.current && keepMessagesAtBottom.current) element.scrollTop = element.scrollHeight; });
