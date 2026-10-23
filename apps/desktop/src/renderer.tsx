@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { otherUser, type DesktopApi, type Snapshot, type User } from '../../../packages/protocol/src/index';
 import dvaAvatar from '../../../resource/dva_avatar.png';
 import mercyAvatar from '../../../resource/mercy_avatar.png';
+import echoAvatar from '../../../resource/echo_avatar.png';
+import echoIcon from '../../../resource/echo.png';
 import './style.css';
 import './call.css';
 import { AudioPanel } from './AudioPanel';
@@ -11,6 +13,7 @@ import { Icon } from './Icon';
 import { RemoteDesktopSurface } from './RemoteDesktopSurface';
 import { AttachmentMessage } from './AttachmentMessage';
 import { ScreenshotSurface } from './ScreenshotSurface';
+import { defaultGroupDraft, insertEchoMention, isBareEchoMention, mentionQuery, uploadGroupAttachments } from './group-composer';
 declare global { interface Window { darling: DesktopApi } }
 const avatars = { dva: dvaAvatar, mercy: mercyAvatar };
 const names = { dva: 'D.Va', mercy: 'Mercy' };
@@ -18,7 +21,8 @@ const initial: Snapshot = { status: 'connecting', online: [], messages: [], pend
 function Avatar({ user, small = false }: { user: User; small?: boolean }) {
   return <img className={`avatar ${small ? 'small' : ''}`} src={avatars[user]} alt={names[user]} />;
 }
-function GroupAvatar({ small = false }: { small?: boolean }) { return <span className={`group-avatar ${small ? 'small' : ''}`}><img src={dvaAvatar}/><img src={mercyAvatar}/><b>E</b></span>; }
+function GroupAvatar({ small = false }: { small?: boolean }) { return <span className={`group-avatar ${small ? 'small' : ''}`}><img src={dvaAvatar}/><img src={mercyAvatar}/><img className="echo" src={echoIcon} alt="Echo"/></span>; }
+function EchoAvatar() { return <img className="echo-avatar" src={echoAvatar} alt="Echo"/>; }
 function RemoteSurface({ surface }: { surface: 'remote-control' | 'remote-status' }) {
   const [state, setState] = useState(initial);
   useEffect(() => { const off = window.darling.subscribe(setState); void window.darling.snapshot().then(setState); return off; }, []);
@@ -26,7 +30,9 @@ function RemoteSurface({ surface }: { surface: 'remote-control' | 'remote-status
 }
 function App() {
   const [state, setState] = useState(initial);
-  const [draft, setDraft] = useState('');
+  const [directDraft, setDirectDraft] = useState('');
+  const [groupDraft, setGroupDraft] = useState(defaultGroupDraft);
+  const [mentionOpen, setMentionOpen] = useState(false);
   const [error, setError] = useState('');
   const [audioOpen, setAudioOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -37,6 +43,7 @@ function App() {
   const [sending, setSending] = useState(false);
   const [conversation, setConversation] = useState<'direct' | 'group'>('direct');
   const attachmentTrigger = useRef<HTMLDivElement>(null);
+  const composerInput = useRef<HTMLTextAreaElement>(null);
   const callAction = (action: 'invite' | 'accept' | 'end') => {
     void window.darling.callAction(action, state.call?.callId).then(result => { if (!result.ok) setError(result.error ?? '通话操作失败'); else setError(''); }).catch(() => setError('无法操作通话，请重新连接'));
   };
@@ -100,17 +107,31 @@ function App() {
     return () => { document.removeEventListener('pointerdown', outside); window.removeEventListener('keydown', escape); window.removeEventListener('blur', blur); };
   }, [attachmentMenu]);
   const self = state.user ?? 'dva'; const peer = otherUser(self);
+  const draft = conversation === 'group' ? groupDraft : directDraft;
+  const setDraft = conversation === 'group' ? setGroupDraft : setDirectDraft;
   const online = state.online.includes(peer);
-  useEffect(() => { initialHistoryAnchored.current = false; keepMessagesAtBottom.current = true; ignoreMessageScrollUntil.current = Number.POSITIVE_INFINITY; }, [conversation]);
+  useEffect(() => { initialHistoryAnchored.current = false; keepMessagesAtBottom.current = true; ignoreMessageScrollUntil.current = Number.POSITIVE_INFINITY; setMentionOpen(false); }, [conversation]);
   const send = async () => {
     if ((!draft.trim() && attachments.length === 0) || sending) return; setSending(true); setError('');
     try {
-      if (draft.trim()) { const result = conversation === 'group' ? await window.darling.groupSend(draft) : await window.darling.send(draft); if (!result.ok) { setError(result.error ?? '文字发送失败'); return; } setDraft(''); }
       const failed: typeof attachments = [];
-      for (const attachment of attachments) { const result = conversation === 'group' ? await window.darling.groupAttachmentSend(attachment.token) : await window.darling.attachmentSend(attachment.token); if (!result.ok) { failed.push(attachment); setError(result.error ?? '附件发送失败'); } }
+      if (conversation === 'group') {
+        const uploaded = await uploadGroupAttachments(attachments, token => window.darling.groupAttachmentSend(token));
+        setAttachments(uploaded.failed); if (uploaded.error) setError(uploaded.error);
+        if (uploaded.failed.length > 0) return;
+        if (draft.trim()) { const result = await window.darling.groupSend(draft); if (!result.ok) { setError(result.error ?? '文字发送失败'); return; } }
+        setGroupDraft(defaultGroupDraft);
+      } else {
+        if (draft.trim()) { const result = await window.darling.send(draft); if (!result.ok) { setError(result.error ?? '文字发送失败'); return; } setDirectDraft(''); }
+        for (const attachment of attachments) { const result = await window.darling.attachmentSend(attachment.token); if (!result.ok) { failed.push(attachment); setError(result.error ?? '附件发送失败'); } }
+      }
       setAttachments(failed);
     } catch { setError('发送失败，请检查连接后重试'); }
     finally { setSending(false); }
+  };
+  const chooseEcho = () => {
+    setGroupDraft(value => insertEchoMention(value)); setMentionOpen(false);
+    requestAnimationFrame(() => { const input = composerInput.current; if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); } });
   };
   const appendAttachments = (items: typeof attachments) => setAttachments(current => {
     const available = Math.max(0, 10 - current.length), accepted = items.slice(0, available);
@@ -134,8 +155,8 @@ function App() {
     {(state.status === 'error' || state.status === 'replaced') && <div className="config-path">配置文件：{state.configPath}</div>}
     <div className="workspace" data-module="chat"><div ref={messages} className="messages" aria-live="polite" onScroll={event => { if (!initialHistoryAnchored.current || Date.now() < ignoreMessageScrollUntil.current) return; const element = event.currentTarget; keepMessagesAtBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 96; }}>{conversation === 'direct' && state.messages.length === 0 && state.pending.length === 0 && <div className="empty"><Avatar user={peer}/><h2>{names[peer]}</h2><p>发一条消息，开始聊天</p></div>}{conversation === 'group' && (state.groupMessages?.length ?? 0) === 0 && <div className="empty"><GroupAvatar/><h2>D.Va、Mercy 与 Echo</h2><p>发送第一条群聊消息</p></div>}
     {conversation === 'direct' && state.messages.map(m => <article className={`message ${m.sender === self ? 'mine' : ''}`} key={m.id}><Avatar user={m.sender} small/><div className="message-content"><div className="message-meta">{names[m.sender]}<time>{new Date(m.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></div>{m.attachment ? <AttachmentMessage attachment={m.attachment}/> : <div className="bubble">{m.text}</div>}</div></article>)}
-    {conversation === 'direct' && state.pending.map(m => <article className="message mine" key={m.clientId}><Avatar user={self} small/><div className="message-content"><div className="bubble pending">{m.text}</div><div className="delivery">{state.status === 'online' ? '发送中…' : '等待重连'}</div></div></article>)}{conversation === 'group' && (state.groupMessages ?? []).map(m => <article className={`message ${m.sender === self ? 'mine' : ''} ${m.sender === 'echo' ? 'assistant-message' : ''}`} key={m.id}>{m.sender === 'echo' ? <span className="echo-avatar">E</span> : <Avatar user={m.sender} small/>}<div className="message-content"><div className="message-meta">{m.sender === 'echo' ? 'Echo · AI' : names[m.sender]}<time>{new Date(m.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></div>{m.attachment ? <AttachmentMessage attachment={m.attachment} group/> : <div className="bubble">{m.text}</div>}</div></article>)}{conversation === 'group' && state.groupAi?.status && <article className="message assistant-message ai-stream"><span className="echo-avatar">E</span><div className="message-content"><div className="message-meta">Echo · AI</div><div className={`bubble ${state.groupAi.status === 'streaming' ? 'streaming' : 'failed'}`}>{state.groupAi.status === 'streaming' ? (state.groupAi.text || '正在思考…') : state.groupAi.error}</div>{state.groupAi.status === 'streaming' && state.groupAi.requestId && <button className="stop-ai" onClick={() => void window.darling.groupAiCancel(state.groupAi!.requestId!)}>停止生成</button>}</div></article>}<div/></div></div>
-    <div className="composer">{attachments.length > 0 && <div className="pending-attachments">{attachments.map(item => <div key={item.token}><span className="file-type small">{item.image ? 'IMG' : (item.name.split('.').pop()?.slice(0, 4).toUpperCase() || 'FILE')}</span><span>{item.name}</span><button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.token)}>×</button></div>)}</div>}<div className="compose-box"><div className="attachment-trigger" ref={attachmentTrigger}><button className="plus" aria-label="添加附件" aria-expanded={attachmentMenu} onClick={() => setAttachmentMenu(value => !value)}><Icon name="plus"/></button>{attachmentMenu && <div className="attachment-menu"><button onClick={pickAttachments}><Icon name="file"/><span><strong>上传文件</strong><small>图片或其他文件</small></span></button><button onClick={takeScreenshot}><Icon name="camera"/><span><strong>截图</strong><small>框选主显示器区域</small></span></button></div>}</div><textarea aria-label="聊天消息" placeholder={conversation === 'group' ? '输入 @Echo 向助手提问…' : `发送消息给 ${names[peer]}…`} value={draft} maxLength={8000} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><button className="send" disabled={(!draft.trim() && attachments.length === 0) || sending || !state.user || ['error', 'replaced'].includes(state.status)} onClick={() => void send()} aria-label="发送"><Icon name="send"/></button></div><div className="compose-footer"><span>{error || (sending ? '正在发送…' : conversation === 'group' ? '发送图片后用 @Echo 提问 · 普通消息不会调用 AI' : 'Enter 发送 · Shift + Enter 换行')}</span></div></div></main></div>
+    {conversation === 'direct' && state.pending.map(m => <article className="message mine" key={m.clientId}><Avatar user={self} small/><div className="message-content"><div className="bubble pending">{m.text}</div><div className="delivery">{state.status === 'online' ? '发送中…' : '等待重连'}</div></div></article>)}{conversation === 'group' && (state.groupMessages ?? []).map(m => <article className={`message ${m.sender === self ? 'mine' : ''} ${m.sender === 'echo' ? 'assistant-message' : ''}`} key={m.id}>{m.sender === 'echo' ? <EchoAvatar/> : <Avatar user={m.sender} small/>}<div className="message-content"><div className="message-meta">{m.sender === 'echo' ? 'Echo · AI' : names[m.sender]}<time>{new Date(m.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></div>{m.attachment ? <AttachmentMessage attachment={m.attachment} group/> : <div className="bubble">{m.text}</div>}</div></article>)}{conversation === 'group' && state.groupAi?.status && <article className="message assistant-message ai-stream"><EchoAvatar/><div className="message-content"><div className="message-meta">Echo · AI</div><div className={`bubble ${state.groupAi.status === 'streaming' ? 'streaming' : 'failed'}`}>{state.groupAi.status === 'streaming' ? (state.groupAi.text || '正在思考…') : state.groupAi.error}</div>{state.groupAi.status === 'streaming' && state.groupAi.requestId && <button className="stop-ai" onClick={() => void window.darling.groupAiCancel(state.groupAi!.requestId!)}>停止生成</button>}</div></article>}<div/></div></div>
+    <div className="composer">{attachments.length > 0 && <div className="pending-attachments">{attachments.map(item => <div key={item.token}><span className="file-type small">{item.image ? 'IMG' : (item.name.split('.').pop()?.slice(0, 4).toUpperCase() || 'FILE')}</span><span>{item.name}</span><button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.token)}>×</button></div>)}</div>}<div className="compose-box"><div className="attachment-trigger" ref={attachmentTrigger}><button className="plus" aria-label="添加附件" aria-expanded={attachmentMenu} onClick={() => setAttachmentMenu(value => !value)}><Icon name="plus"/></button>{attachmentMenu && <div className="attachment-menu"><button onClick={pickAttachments}><Icon name="file"/><span><strong>上传文件</strong><small>图片或其他文件</small></span></button><button onClick={takeScreenshot}><Icon name="camera"/><span><strong>截图</strong><small>框选主显示器区域</small></span></button></div>}</div>{conversation === 'group' && mentionOpen && <div id="echo-mention-menu" className="mention-menu" role="listbox"><button role="option" aria-selected="true" onMouseDown={event => event.preventDefault()} onClick={chooseEcho}><img src={echoAvatar} alt=""/><span><strong>Echo</strong><small>AI 助手 · Enter 选择</small></span></button></div>}<textarea ref={composerInput} aria-label="聊天消息" aria-expanded={conversation === 'group' ? mentionOpen : undefined} aria-controls={conversation === 'group' && mentionOpen ? 'echo-mention-menu' : undefined} placeholder={conversation === 'group' ? '输入消息，使用 @ 可选择 Echo…' : `发送消息给 ${names[peer]}…`} value={draft} maxLength={8000} onChange={e => { const value = e.target.value; setDraft(value); setMentionOpen(conversation === 'group' && !!mentionQuery(value)); }} onKeyDown={e => { if (conversation === 'group' && mentionOpen && (e.key === 'Enter' || e.key === 'Tab') && !e.nativeEvent.isComposing) { e.preventDefault(); chooseEcho(); return; } if (e.key === 'Escape' && mentionOpen) { e.preventDefault(); setMentionOpen(false); return; } if (conversation === 'group' && e.key === 'Backspace' && isBareEchoMention(draft)) { e.preventDefault(); setGroupDraft(''); setMentionOpen(false); return; } if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (conversation === 'group' && attachments.length === 0 && isBareEchoMention(draft)) { setGroupDraft(''); setMentionOpen(false); } else void send(); } }}/><button className="send" disabled={(!draft.trim() && attachments.length === 0) || sending || !state.user || ['error', 'replaced'].includes(state.status)} onClick={() => void send()} aria-label="发送"><Icon name="send"/></button></div><div className="compose-footer"><span>{error || (sending ? '正在发送…' : conversation === 'group' ? '@Echo 会在附件上传完成后收到问题 · Enter 发送' : 'Enter 发送 · Shift + Enter 换行')}</span></div></div></main></div>
   </div>;
 }
 const surface = new URLSearchParams(location.search).get('surface');

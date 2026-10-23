@@ -41,6 +41,27 @@ app.on('web-contents-created', (_event, contents) => {
       await contents.executeJavaScript(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
       await new Promise(resolve => setTimeout(resolve, 50));
       if (await contents.executeJavaScript(`document.body.innerText.includes('上传文件')`)) throw new Error('Attachment menu did not close on Escape');
+      await contents.executeJavaScript(`document.querySelector('.group-contact').click()`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const groupComposer = await contents.executeJavaScript(`(() => {
+        const input = document.querySelector('textarea');
+        return { value: input.value, groupIcon: !!document.querySelector('.group-avatar img.echo')?.getAttribute('src') };
+      })()`);
+      if (groupComposer.value !== '@Echo ' || !groupComposer.groupIcon) throw new Error('Group composer or Echo group icon failed: ' + JSON.stringify(groupComposer));
+      await contents.executeJavaScript(`(() => { const input = document.querySelector('textarea'); input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (await contents.executeJavaScript(`document.querySelector('textarea').value`) !== '') throw new Error('Bare @Echo was not cleared by Enter');
+      const mention = await contents.executeJavaScript(`(() => { const input = document.querySelector('textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(input, '@'); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const mentionVisible = await contents.executeJavaScript(`!!document.querySelector('.mention-menu') && document.body.innerText.includes('AI 助手 · Enter 选择')`);
+      if (!mention || !mentionVisible) throw new Error('Echo mention menu failed');
+      await contents.executeJavaScript(`document.querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const completedMention = await contents.executeJavaScript(`({ value: document.querySelector('textarea').value, menu: !!document.querySelector('.mention-menu') })`);
+      if (completedMention.value !== '@Echo ' || completedMention.menu) throw new Error('Echo mention keyboard selection failed: ' + JSON.stringify(completedMention));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const groupScreenshot = (await contents.capturePage()).toPNG();
+      await contents.executeJavaScript(`document.querySelector('.contact:not(.group-contact)').click()`);
       const blobImage = await contents.executeJavaScript(`new Promise(resolve => { const image = new Image(); const url = URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>'], { type: 'image/svg+xml' })); image.onload = () => { URL.revokeObjectURL(url); resolve(true); }; image.onerror = () => { URL.revokeObjectURL(url); resolve(false); }; image.src = url; document.body.appendChild(image); })`);
       if (!blobImage) throw new Error('Blob attachment preview is blocked by page policy');
       const selectedScreenshot = await contents.executeJavaScript(`window.darling.attachmentScreenshot()`);
@@ -73,6 +94,7 @@ app.on('web-contents-created', (_event, contents) => {
       if (errors.length) throw new Error(errors.join('\n'));
       const directory = join(root, '.local', 'desktop-smoke'); mkdirSync(directory, { recursive: true });
       const screenshot = await contents.capturePage(); writeFileSync(join(directory, 'preview.png'), screenshot.toPNG());
+      writeFileSync(join(directory, 'group-preview.png'), groupScreenshot);
       writeFileSync(join(directory, 'result.json'), JSON.stringify({ passed: true, checkedAt: new Date().toISOString(), visibleVerified: visibleCheck && actualWindow.isVisible(), nativeVerified: !!nativeResult, deviceCount: nativeResult?.devices.length }, null, 2));
       console.log('PASS: real Electron main/preload/React render, attachment menu, config error state and audio panel; screenshot saved.');
       clearTimeout(timeout); app.quit();
