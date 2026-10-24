@@ -99,19 +99,26 @@ diff --git a/modules/audio_device/win/core_audio_base_win.cc b/modules/audio_dev
 index be90bb4..77cd66e 100644
 --- a/modules/audio_device/win/core_audio_base_win.cc
 +++ b/modules/audio_device/win/core_audio_base_win.cc
-@@ -535,6 +535,19 @@ bool CoreAudioBase::Init() {
+@@ -535,6 +535,26 @@ bool CoreAudioBase::Init() {
    }
    RTC_DLOG(LS_INFO) << "audio session state: " << SessionStateToString(state);
    RTC_DCHECK_EQ(state, AudioSessionStateInactive);
 +  // Darling keeps other applications at their chosen volume during calls.
-+  // Preserve the Communications category (and its voice-oriented device
-+  // behavior), but opt the render session out of Windows communications
-+  // ducking before the session becomes active.
++  // SetDuckingPreference only opts this session out of being attenuated. The
++  // per-stream ducking control below prevents this communications stream from
++  // attenuating other sessions.
 +  if (IsOutput()) {
 +    ComPtr<IAudioSessionControl2> audio_session_control2;
 +    if (FAILED(audio_session_control.As(&audio_session_control2)) ||
 +        FAILED(audio_session_control2->SetDuckingPreference(TRUE))) {
 +      RTC_LOG(LS_ERROR) << "Failed to disable communications ducking";
++      return false;
++    }
++    ComPtr<IAudioClientDuckingControl> ducking_control;
++    if (FAILED(audio_client->GetService(IID_PPV_ARGS(&ducking_control))) ||
++        FAILED(ducking_control->SetDuckingOptionsForCurrentStream(
++            AUDIO_DUCKING_OPTIONS_DO_NOT_DUCK_OTHER_STREAMS))) {
++      RTC_LOG(LS_ERROR) << "Failed to prevent this stream from ducking others";
 +      return false;
 +    }
 +  }

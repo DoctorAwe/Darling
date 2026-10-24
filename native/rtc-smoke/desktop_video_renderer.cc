@@ -65,13 +65,17 @@ void DesktopVideoRenderer::Run(std::stop_token stop, HWND parent) {
   Bounds bounds;
   { std::lock_guard lock(mutex_); bounds = bounds_; }
   HWND window = CreateWindowExW(
-      WS_EX_NOACTIVATE | WS_EX_TRANSPARENT, kWindowClass, L"",
+      WS_EX_NOACTIVATE, kWindowClass, L"",
       WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, bounds.x, bounds.y,
       bounds.width, bounds.height, parent, nullptr, GetModuleHandleW(nullptr), this);
   if (!window) return;
   // The Electron stage remains the sole input surface. A disabled child still
   // paints normally but Windows routes pointer/keyboard input to the parent.
   EnableWindow(window, FALSE);
+  SetWindowPos(window, HWND_TOP, bounds.x, bounds.y, bounds.width,
+               bounds.height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  RedrawWindow(window, nullptr, nullptr,
+               RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
   window_.store(window);
   MSG message;
   while (!stop.stop_requested() && GetMessageW(&message, nullptr, 0, 0) > 0) {
